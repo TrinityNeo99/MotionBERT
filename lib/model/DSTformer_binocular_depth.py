@@ -8,6 +8,8 @@ from collections import OrderedDict
 from functools import partial
 from itertools import repeat
 from lib.model.drop import DropPath
+from einops import rearrange
+
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
     # Cut & paste from PyTorch official master until it's in a few official releases - RW
@@ -137,8 +139,7 @@ class Attention(nn.Module):
             x = self.forward_spatial(q, k, v)
         elif self.mode == 'temporal':
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-            # 3 B nH N Hdim -> q : B nH N Hdim
-            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple) # B N C
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
             x = self.forward_temporal(q, k, v, seqlen=seqlen)
         elif self.mode == 'spatial':
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -187,7 +188,6 @@ class Attention(nn.Module):
         return x
 
     def forward_temporal(self, q, k, v, seqlen=8):
-        # B nH N Hdim
         B, _, N, C = q.shape
         qt = q.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
         kt = k.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
@@ -276,7 +276,7 @@ class Block(nn.Module):
         return x
 
 
-class DSTformer(nn.Module):
+class DSTformer_binocular_depth(nn.Module):
     def __init__(self, dim_in=3, dim_out=3, dim_feat=256, dim_rep=512,
                  depth=5, num_heads=8, mlp_ratio=4,
                  num_joints=17, maxlen=243,
@@ -287,6 +287,7 @@ class DSTformer(nn.Module):
         self.dim_feat = dim_feat
         self.joints_embed = nn.Linear(dim_in, dim_feat)
         self.pos_drop = nn.Dropout(p=drop_rate)
+        self.left_right_fusion_map = nn.Linear(num_joints * dim_feat, 2)
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks_st = nn.ModuleList([
             Block(
@@ -309,6 +310,9 @@ class DSTformer(nn.Module):
         else:
             self.pre_logits = nn.Identity()
         self.head = nn.Linear(dim_rep, dim_out) if dim_out > 0 else nn.Identity()
+        self.head_left2right = nn.Linear(dim_rep, dim_out)
+        self.head_right2left = nn.Linear(dim_rep, dim_out)
+
         self.temp_embed = nn.Parameter(torch.zeros(1, maxlen, 1, dim_feat))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_joints, dim_feat))
         trunc_normal_(self.temp_embed, std=.02)
@@ -337,9 +341,9 @@ class DSTformer(nn.Module):
         self.dim_out = dim_out
         self.head = nn.Linear(self.dim_feat, dim_out) if dim_out > 0 else nn.Identity()
 
-    def forward(self, x, return_rep=False):
+    def forward_s(self, x, return_rep=False):
         B, F, J, C = x.shape
-        x = x.reshape(-1, J, C)  # BF J C
+        x = x.reshape(-1, J, C)
         BF = x.shape[0]
         x = self.joints_embed(x)
         x = x + self.pos_embed
@@ -365,8 +369,23 @@ class DSTformer(nn.Module):
         x = self.pre_logits(x)  # [B, F, J, dim_feat]
         if return_rep:
             return x
-        x = self.head(x)
+        # x = self.head(x)
         return x
+
+    def forward(self, x_left, x_right, x_depth):
+        x_left[:, :, :, -1] = x_depth
+        x_right[:, :, :, -1] = x_depth
+        x_left = self.forward_s(x_left)
+        x_right = self.forward_s(x_right)
+        _x_left = rearrange(x_left, 'b t v c -> b t (v c)')
+        fusion_weights = self.left_right_fusion_map(_x_left)
+        fusion_weights = torch.softmax(fusion_weights, dim=-1)
+        x_out = x_left * fusion_weights[:, :, 0].unsqueeze(-1).unsqueeze(-1) + x_right * fusion_weights[:, :,
+                                                                                         1].unsqueeze(-1).unsqueeze(-1)
+        x_out = self.head(x_out)
+        x_left_pre = self.head_right2left(x_right)
+        x_right_pre = self.head_left2right(x_left)
+        return x_out, x_left_pre, x_right_pre
 
     def get_representation(self, x):
         return self.forward(x, return_rep=True)

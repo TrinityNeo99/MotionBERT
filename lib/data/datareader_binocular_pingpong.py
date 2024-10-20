@@ -4,13 +4,15 @@ import numpy as np
 import os, sys
 import random
 import copy
+
+sys.path.append("../")
 from lib.utils.tools import read_pkl
 from lib.utils.utils_data import split_clips
 
 random.seed(0)
 
 
-class DataReaderH36M(object):
+class DataReaderBinocular(object):
     def __init__(self, n_frames, sample_stride, data_stride_train, data_stride_test, read_confidence=True,
                  dt_root='data/motion3d', dt_file='h36m_cpn_cam_source.pkl'):
         self.gt_trainset = None
@@ -28,23 +30,6 @@ class DataReaderH36M(object):
     def read_2d(self):
         trainset = self.dt_dataset['train']['joint_2d'][::self.sample_stride, :, :2].astype(np.float32)  # [N, 17, 2]
         testset = self.dt_dataset['test']['joint_2d'][::self.sample_stride, :, :2].astype(np.float32)  # [N, 17, 2]
-        # map to [-1, 1]
-        for idx, camera_name in enumerate(self.dt_dataset['train']['camera_name']):
-            if camera_name == '54138969' or camera_name == '60457274':
-                res_w, res_h = 1000, 1002
-            elif camera_name == '55011271' or camera_name == '58860488':
-                res_w, res_h = 1000, 1000
-            else:
-                assert 0, '%d data item has an invalid camera name' % idx
-            trainset[idx, :, :] = trainset[idx, :, :] / res_w * 2 - [1, res_h / res_w]
-        for idx, camera_name in enumerate(self.dt_dataset['test']['camera_name']):
-            if camera_name == '54138969' or camera_name == '60457274':
-                res_w, res_h = 1000, 1002
-            elif camera_name == '55011271' or camera_name == '58860488':
-                res_w, res_h = 1000, 1000
-            else:
-                assert 0, '%d data item has an invalid camera name' % idx
-            testset[idx, :, :] = testset[idx, :, :] / res_w * 2 - [1, res_h / res_w]
         if self.read_confidence:
             if 'confidence' in self.dt_dataset['train'].keys():
                 train_confidence = self.dt_dataset['train']['confidence'][::self.sample_stride].astype(np.float32)
@@ -65,41 +50,14 @@ class DataReaderH36M(object):
             np.float32)  # [N, 17, 3]
         test_labels = self.dt_dataset['test']['joint3d_image'][::self.sample_stride, :, :3].astype(
             np.float32)  # [N, 17, 3]
-        # map to [-1, 1]
-        for idx, camera_name in enumerate(self.dt_dataset['train']['camera_name']):
-            if camera_name == '54138969' or camera_name == '60457274':
-                res_w, res_h = 1000, 1002
-            elif camera_name == '55011271' or camera_name == '58860488':
-                res_w, res_h = 1000, 1000
-            else:
-                assert 0, '%d data item has an invalid camera name' % idx
-            train_labels[idx, :, :2] = train_labels[idx, :, :2] / res_w * 2 - [1, res_h / res_w]
-            train_labels[idx, :, 2:] = train_labels[idx, :, 2:] / res_w * 2
-
-        for idx, camera_name in enumerate(self.dt_dataset['test']['camera_name']):
-            if camera_name == '54138969' or camera_name == '60457274':
-                res_w, res_h = 1000, 1002
-            elif camera_name == '55011271' or camera_name == '58860488':
-                res_w, res_h = 1000, 1000
-            else:
-                assert 0, '%d data item has an invalid camera name' % idx
-            test_labels[idx, :, :2] = test_labels[idx, :, :2] / res_w * 2 - [1, res_h / res_w]
-            test_labels[idx, :, 2:] = test_labels[idx, :, 2:] / res_w * 2
-
         return train_labels, test_labels
 
     def read_hw(self):
         if self.test_hw is not None:
             return self.test_hw
-        test_hw = np.zeros((len(self.dt_dataset['test']['camera_name']), 2))
-        for idx, camera_name in enumerate(self.dt_dataset['test']['camera_name']):
-            if camera_name == '54138969' or camera_name == '60457274':
-                res_w, res_h = 1000, 1002
-            elif camera_name == '55011271' or camera_name == '58860488':
-                res_w, res_h = 1000, 1000
-            else:
-                assert 0, '%d data item has an invalid camera name' % idx
-            test_hw[idx] = res_w, res_h
+        test_hw = np.zeros((len(self.dt_dataset['test']['joint3d_image']), 2))
+        for idx, camera_name in enumerate(self.dt_dataset['test']['joint3d_image']):
+            test_hw[idx] = 1920, 1080
         self.test_hw = test_hw
         return test_hw
 
@@ -116,15 +74,16 @@ class DataReaderH36M(object):
         #       Only Testset HW is needed for denormalization
         test_hw = self.read_hw()  # train_data (1559752, 2) test_data (566920, 2)
         split_id_train, split_id_test = self.get_split_id()
-        # test_hw = test_hw[split_id_test][:, 0, :]  # (N, 2)
-        test_hw = self.get_sliced_data_sub(test_hw, split_id_test)  # (N, 2)
+        # test_hw = test_hw[split_id_test][:,0,:]                      # (N, 2)
+        test_hw = self.get_sliced_data_sub(test_hw, split_id_test)
         test_hw = test_hw[:, 0, :]
         return test_hw
 
     def get_sliced_data(self):
         train_data, test_data = self.read_2d()  # train_data (1559752, 17, 3) test_data (566920, 17, 3)
         train_labels, test_labels = self.read_3d()  # train_labels (1559752, 17, 3) test_labels (566920, 17, 3)
-        split_id_train, split_id_test = self.get_split_id()
+        split_id_train, \
+            split_id_test = self.get_split_id()
         # train_data, test_data = train_data[split_id_train], test_data[split_id_test]                # (N, 27, 17, 3)
         # train_labels, test_labels = train_labels[split_id_train], test_labels[split_id_test]        # (N, 27, 17, 3)
         # ipdb.set_trace()
@@ -133,6 +92,9 @@ class DataReaderH36M(object):
         test_data = self.get_sliced_data_sub(test_data, split_id_test)
         test_labels = self.get_sliced_data_sub(test_labels, split_id_test)
         return train_data, test_data, train_labels, test_labels
+
+    def get_sliced_data_sub(self, data, ranges: list):
+        return np.stack([data[r] for r in ranges], axis=0)
 
     def denormalize(self, test_data):
         #       data: (N, n_frames, 51) or data: (N, n_frames, 17, 3)
@@ -146,6 +108,3 @@ class DataReaderH36M(object):
             data[idx, :, :, :2] = (data[idx, :, :, :2] + np.array([1, res_h / res_w])) * res_w / 2
             data[idx, :, :, 2:] = data[idx, :, :, 2:] * res_w / 2
         return data  # [n_clips, -1, 17, 3]
-
-    def get_sliced_data_sub(self, data, ranges: list):
-        return np.stack([data[r] for r in ranges], axis=0)

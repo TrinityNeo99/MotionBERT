@@ -8,6 +8,8 @@ from collections import OrderedDict
 from functools import partial
 from itertools import repeat
 from lib.model.drop import DropPath
+from einops import rearrange, repeat
+
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
     # Cut & paste from PyTorch official master until it's in a few official releases - RW
@@ -137,8 +139,7 @@ class Attention(nn.Module):
             x = self.forward_spatial(q, k, v)
         elif self.mode == 'temporal':
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-            # 3 B nH N Hdim -> q : B nH N Hdim
-            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple) # B N C
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
             x = self.forward_temporal(q, k, v, seqlen=seqlen)
         elif self.mode == 'spatial':
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -187,7 +188,6 @@ class Attention(nn.Module):
         return x
 
     def forward_temporal(self, q, k, v, seqlen=8):
-        # B nH N Hdim
         B, _, N, C = q.shape
         qt = q.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
         kt = k.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
@@ -286,7 +286,7 @@ class DSTformer(nn.Module):
         self.dim_out = dim_out
         self.dim_feat = dim_feat
         self.joints_embed = nn.Linear(dim_in, dim_feat)
-        self.pos_drop = nn.Dropout(p=drop_rate)
+
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks_st = nn.ModuleList([
             Block(
@@ -301,14 +301,8 @@ class DSTformer(nn.Module):
                 st_mode="stage_ts")
             for i in range(depth)])
         self.norm = norm_layer(dim_feat)
-        if dim_rep:
-            self.pre_logits = nn.Sequential(OrderedDict([
-                ('fc', nn.Linear(dim_feat, dim_rep)),
-                ('act', nn.Tanh())
-            ]))
-        else:
-            self.pre_logits = nn.Identity()
-        self.head = nn.Linear(dim_rep, dim_out) if dim_out > 0 else nn.Identity()
+
+        # self.head = nn.Linear(dim_rep, dim_out) if dim_out > 0 else nn.Identity()
         self.temp_embed = nn.Parameter(torch.zeros(1, maxlen, 1, dim_feat))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_joints, dim_feat))
         trunc_normal_(self.temp_embed, std=.02)
@@ -339,15 +333,8 @@ class DSTformer(nn.Module):
 
     def forward(self, x, return_rep=False):
         B, F, J, C = x.shape
-        x = x.reshape(-1, J, C)  # BF J C
-        BF = x.shape[0]
-        x = self.joints_embed(x)
-        x = x + self.pos_embed
-        _, J, C = x.shape
-        x = x.reshape(-1, F, J, C) + self.temp_embed[:, :F, :, :]
-        x = x.reshape(BF, J, C)
-        x = self.pos_drop(x)
         alphas = []
+        x = x.reshape(-1, J, C)
         for idx, (blk_st, blk_ts) in enumerate(zip(self.blocks_st, self.blocks_ts)):
             x_st = blk_st(x, F)
             x_ts = blk_ts(x, F)
@@ -361,12 +348,138 @@ class DSTformer(nn.Module):
             else:
                 x = (x_st + x_ts) * 0.5
         x = self.norm(x)
-        x = x.reshape(B, F, J, -1)
-        x = self.pre_logits(x)  # [B, F, J, dim_feat]
         if return_rep:
             return x
-        x = self.head(x)
+        # x = self.head(x)
+        x = x.reshape(B, F, J, C)
         return x
 
     def get_representation(self, x):
         return self.forward(x, return_rep=True)
+
+
+class Unified_Binocular(nn.Module):
+    def __init__(self, dim_in=3, dim_out=3, dim_feat=256, dim_rep=512,
+                 depth=5, num_heads=8, mlp_ratio=4,
+                 num_joints=17, maxlen=243,
+                 qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
+                 norm_layer=nn.LayerNorm, att_fuse=True, use_decoder=False):
+        super().__init__()
+        self.num_keypoints = num_joints
+
+        self.joints_embed = nn.Linear(dim_in, dim_feat)
+
+        self.temp_embed = nn.Parameter(torch.zeros(1, maxlen, 1, dim_feat))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_joints, dim_feat))
+        self.monocular_embed = nn.Parameter(torch.zeros(1, 1, dim_feat))
+        self.binocular_embed_left = nn.Parameter(torch.zeros(1, 1, dim_feat))
+        self.binocular_embed_right = nn.Parameter(torch.zeros(1, 1, dim_feat))
+        self.binocular_embed = nn.Parameter(torch.zeros(1, 1, dim_feat))
+        self.self2self_embed = nn.Parameter(torch.zeros(1, 1, dim_feat))
+
+        trunc_normal_(self.temp_embed, std=.02)
+        trunc_normal_(self.pos_embed, std=.02)
+        trunc_normal_(self.monocular_embed, std=.02)
+        trunc_normal_(self.binocular_embed_left, std=.02)
+        trunc_normal_(self.binocular_embed_right, std=.02)
+        trunc_normal_(self.binocular_embed, std=.02)
+        trunc_normal_(self.self2self_embed, std=.02)
+
+        self.encoder = DSTformer(dim_in=dim_in, dim_out=3, dim_feat=dim_feat, dim_rep=dim_rep,
+                                 depth=depth, num_heads=num_heads, mlp_ratio=mlp_ratio,
+                                 num_joints=num_joints, maxlen=maxlen,
+                                 qkv_bias=qkv_bias, qk_scale=qk_scale, drop_rate=drop_rate,
+                                 attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
+                                 norm_layer=norm_layer, att_fuse=att_fuse)
+
+        self.use_decoder = use_decoder
+        if use_decoder:
+            self.decoder = DSTformer(dim_in=dim_in, dim_out=3, dim_feat=dim_feat, dim_rep=dim_rep,
+                                     depth=2, num_heads=num_heads, mlp_ratio=mlp_ratio,
+                                     num_joints=num_joints, maxlen=maxlen,
+                                     qkv_bias=qkv_bias, qk_scale=qk_scale, drop_rate=drop_rate,
+                                     attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
+                                     norm_layer=norm_layer, att_fuse=att_fuse)
+
+            self.keypoint_monocular_3d = nn.Parameter(torch.zeros(num_joints, dim_feat))
+            self.keypoint_binocular_left_2d = nn.Parameter(torch.zeros(num_joints, dim_feat))
+            self.keypoint_binocular_right_2d = nn.Parameter(torch.zeros(num_joints, dim_feat))
+            self.keypoint_binocular_3d = nn.Parameter(torch.zeros(num_joints, dim_feat))
+            self.keypoint_self2self_2d = nn.Parameter(torch.zeros(num_joints, dim_feat))
+
+        self.interpreter2d = nn.Linear(dim_feat, dim_out)  # the 2d confidence is the last channel
+        self.interpreter3d = nn.Linear(dim_feat, dim_out)
+        self.pos_drop = nn.Dropout(p=drop_rate)
+
+        if dim_rep:
+            self.pre_logits = nn.Sequential(OrderedDict([
+                ('fc', nn.Linear(dim_feat, dim_rep)),
+                ('act', nn.Tanh())
+            ]))
+        else:
+            self.pre_logits = nn.Identity()
+
+    def forward(self, x, type="self2self"):
+        B, F, J, C = x.shape
+        x = x.reshape(-1, J, C)
+        x = self.joints_embed(x)
+        x = x + self.pos_embed
+        if type == "self2self":
+            x += self.self2self_embed
+        elif type == "left2right":
+            x += self.binocular_embed_left
+        elif type == "right2left":
+            x += self.binocular_embed_right
+        elif type == "monocular":
+            x += self.monocular_embed
+        elif type == "binocular":
+            x += self.binocular_embed
+        else:
+            raise Exception("Undefined task type")
+        _, J, C = x.shape
+        if type == "binocular":
+            x = x.reshape(-1, F, J, C)
+            f = F // 2
+            x[:, :f, :, :] += self.temp_embed[:, :f, :, :]
+            x[:, f:, :, :] += self.temp_embed[:, :f, :, :]
+        else:
+            x = x.reshape(-1, F, J, C) + self.temp_embed[:, :F, :, :]
+        # x = x.reshape(-1, J, C)
+        x = self.pos_drop(x)
+        x = self.encoder(x)
+
+        if self.use_decoder:
+            if type == "self2self":
+                keypoint_tokens = repeat(self.keypoint_self2self_2d, 'j c -> b f j c', b=B, f=F)
+            elif type == "left2right":
+                keypoint_tokens = repeat(self.keypoint_binocular_right_2d, 'j c -> b f j c', b=B, f=F)
+            elif type == "right2left":
+                keypoint_tokens = repeat(self.keypoint_binocular_left_2d, 'j c -> b f j c', b=B, f=F)
+            elif type == "monocular":
+                keypoint_tokens = repeat(self.keypoint_monocular_3d, 'j c -> b f j c', b=B, f=F)
+            elif type == "binocular":
+                keypoint_tokens = repeat(self.keypoint_binocular_3d, 'j c -> b f j c', b=B, f=F // 2)
+            else:
+                raise Exception("Undefined task type")
+            x = torch.cat((keypoint_tokens, x), dim=1)
+            x = self.decoder(x)
+            if type == "binocular":
+                x = x[:, :F // 2, :, :]  # may error
+            else:
+                x = x[:, :F, :, :]
+        else:
+            if type == "binocular":
+                x_left = x[:, :F // 2, :, :]
+                x_right = x[:, F // 2:, :, :]
+                x = (x_left + x_right) * 0.5
+
+        x = self.pre_logits(x)  # [B, F, J, dim_feat]
+
+        # xxxx
+        if type in ["self2self", "left2right", "right2left"]:
+            x = self.interpreter2d(x)
+        elif type in ["monocular", "binocular"]:
+            x = self.interpreter3d(x)
+        else:
+            raise Exception("Undefined task type")
+        return x

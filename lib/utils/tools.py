@@ -7,14 +7,17 @@ from typing import Any, IO
 
 ROOT_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
 
+
 class TextLogger:
     def __init__(self, log_path):
         self.log_path = log_path
         with open(self.log_path, "w") as f:
             f.write("")
+
     def log(self, log):
         with open(self.log_path, "a+") as f:
             f.write(log + "\n")
+
 
 class Loader(yaml.SafeLoader):
     """YAML Loader with `!include` constructor."""
@@ -29,6 +32,7 @@ class Loader(yaml.SafeLoader):
 
         super().__init__(stream)
 
+
 def construct_include(loader: Loader, node: yaml.Node) -> Any:
     """Include file referenced at node."""
 
@@ -38,10 +42,11 @@ def construct_include(loader: Loader, node: yaml.Node) -> Any:
     with open(filename, 'r') as f:
         if extension in ('yaml', 'yml'):
             return yaml.load(f, Loader)
-        elif extension in ('json', ):
+        elif extension in ('json',):
             return json.load(f)
         else:
             return ''.join(f.readlines())
+
 
 def get_config(config_path):
     yaml.add_constructor('!include', construct_include, Loader)
@@ -53,6 +58,7 @@ def get_config(config_path):
     config.name = config_name
     return config
 
+
 def ensure_dir(path):
     """
     create path by first checking its existence,
@@ -61,9 +67,10 @@ def ensure_dir(path):
     """
     if not os.path.exists(path):
         os.makedirs(path)
-        
+
+
 def read_pkl(data_url):
-    file = open(data_url,'rb')
+    file = open(data_url, 'rb')
     content = pickle.load(file)
     file.close()
     return content
