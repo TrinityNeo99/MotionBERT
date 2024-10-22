@@ -21,10 +21,10 @@ from lib.utils.tools import *
 from lib.utils.learning import *
 from lib.utils.utils_data import flip_data
 from lib.data.dataset_motion_2d import PoseTrackDataset2D, InstaVDataset2D
-from lib.data.dataset_motion_3d_binocular import MotionDataset3D  # dataloader
+from lib.data.dataset_motion_3d_binocular_depth import MotionDataset3D  # dataloader
 from lib.data.augmentation import Augmenter2D
 from lib.data.datareader_h36m import DataReaderH36M
-from lib.data.datareader_binocular import DataReaderBinocular  # datareader
+from lib.data.datareader_binocular_depth import DataReaderBinocular  # datareader
 from lib.model.loss import *
 import wandb
 
@@ -73,7 +73,7 @@ def evaluate(args, model_pos, test_loader, datareader):
     results_all = []
     model_pos.eval()
     with torch.no_grad():
-        for batch_input, batch_input_right, batch_gt in tqdm(test_loader):
+        for batch_input, batch_input_right, batch_gt, batch_depth in tqdm(test_loader):
             N, T = batch_gt.shape[:2]
             if torch.cuda.is_available():
                 batch_input = batch_input.cuda()
@@ -82,12 +82,13 @@ def evaluate(args, model_pos, test_loader, datareader):
             if args.flip:
                 batch_input_flip = flip_data(batch_input)
                 batch_input_flip_right = flip_data(batch_input_right)
-                predicted_3d_pos_1, _, _ = model_pos(batch_input, batch_input_right)
-                predicted_3d_pos_flip, _, _ = model_pos(batch_input_flip, batch_input_flip_right)
+                predicted_3d_pos_1, _, _ = model_pos(batch_input, batch_input_right, batch_depth)
+                predicted_3d_pos_flip, _, _ = model_pos(batch_input_flip, batch_input_flip_right, batch_depth)
                 predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
                 predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
             else:
-                predicted_3d_pos, predict_2d_left, predict_2d_right = model_pos(batch_input, batch_input_right)
+                predicted_3d_pos, predict_2d_left, predict_2d_right = model_pos(batch_input, batch_input_right,
+                                                                                batch_depth)
 
             if args.rootrel:
                 predicted_3d_pos[:, :, 0, :] = 0  # [N,T,17,3]
@@ -172,7 +173,7 @@ def evaluate(args, model_pos, test_loader, datareader):
 def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt):
     device = f"cuda:{args.device_ids[0]}"
     model_pos.train()
-    for idx, (batch_input, batch_input_right, batch_gt) in tqdm(enumerate(train_loader)):
+    for idx, (batch_input, batch_input_right, batch_gt, batch_depth) in tqdm(enumerate(train_loader)):
         batch_size = len(batch_input)
         if torch.cuda.is_available():
             batch_input = batch_input.to(device)
@@ -193,7 +194,7 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
                 batch_input = args.aug.augment2D(batch_input, noise=(args.noise and has_gt), mask=args.mask)
                 batch_input_right = args.aug.augment2D(batch_input_right, noise=(args.noise and has_gt), mask=args.mask)
 
-        predicted_3d_pos, predict_2d_left, predict_2d_right = model_pos(batch_input, batch_input_right)
+        predicted_3d_pos, predict_2d_left, predict_2d_right = model_pos(batch_input, batch_input_right, batch_depth)
 
         optimizer.zero_grad()
         if has_3d:
@@ -407,7 +408,6 @@ def train_with_config(args, opts):
                 wandb.log({"loss_r2l": losses['r2l'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_l2r": losses['l2r'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_total": losses['total'].avg, "epoch": epoch + 1})
-                wandb.log({"lr": lr, "epoch": epoch + 1})
 
             # Decay learning rate exponentially
             lr *= lr_decay

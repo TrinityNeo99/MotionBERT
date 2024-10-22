@@ -8,7 +8,7 @@ model_saved_name: null
 # Traning 
 epochs: 120
 checkpoint_frequency: 60
-batch_size: 4
+batch_size: 8
 dropout: 0.0
 learning_rate: 0.0002 #org 0.0002
 weight_decay: 0.01
@@ -22,7 +22,8 @@ depth: 5
 dim_rep: 512
 num_heads: 8
 att_fuse: True
-backbone: DSTformer_binocular
+backbone: Unified_Binocular
+use_decoder: False
 
 # Data
 data_root: "../dataset/binocular_data/sports/binocular_f243s81"
@@ -55,5 +56,5 @@ mask_T_ratio: 0.
 noise: False
 
 # Training
-device_ids: [0]
+device_ids: [0,1]
 #device_ids: [2,3,4,5]

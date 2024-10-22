@@ -8,11 +8,13 @@ model_saved_name: null
 # Traning 
 epochs: 120
 checkpoint_frequency: 60
-batch_size: 4
+batch_size: 8
 dropout: 0.0
 learning_rate: 0.0002 #org 0.0002
 weight_decay: 0.01
 lr_decay: 0.99
+tasks: ["binocular_spatial"]
+test_task: binocular_spatial
 
 # Model
 maxlen: 243
@@ -22,11 +24,12 @@ depth: 5
 dim_rep: 512
 num_heads: 8
 att_fuse: True
-backbone: DSTformer_binocular
+backbone: Unified_Binocular
+use_decoder: False
 
 # Data
 data_root: "../dataset/binocular_data/sports/binocular_f243s81"
-subset_list: [binocular]
+subset_list: [binocular_depth]
 dt_file: "binocular_data/sports/coco_17_binocular_depth.pkl"
 clip_len: 243
 data_stride: 81
@@ -55,5 +58,5 @@ mask_T_ratio: 0.
 noise: False
 
 # Training
-device_ids: [0]
+device_ids: [0,1]
 #device_ids: [2,3,4,5]

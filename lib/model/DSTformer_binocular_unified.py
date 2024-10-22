@@ -371,6 +371,8 @@ class Unified_Binocular(nn.Module):
 
         self.temp_embed = nn.Parameter(torch.zeros(1, maxlen, 1, dim_feat))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_joints, dim_feat))
+        self.pos_embed_left = nn.Parameter(torch.zeros(1, num_joints, dim_feat))
+        self.pos_embed_right = nn.Parameter(torch.zeros(1, num_joints, dim_feat))
         self.monocular_embed = nn.Parameter(torch.zeros(1, 1, dim_feat))
         self.binocular_embed_left = nn.Parameter(torch.zeros(1, 1, dim_feat))
         self.binocular_embed_right = nn.Parameter(torch.zeros(1, 1, dim_feat))
@@ -379,6 +381,8 @@ class Unified_Binocular(nn.Module):
 
         trunc_normal_(self.temp_embed, std=.02)
         trunc_normal_(self.pos_embed, std=.02)
+        trunc_normal_(self.pos_embed_left, std=.02)
+        trunc_normal_(self.pos_embed_right, std=.02)
         trunc_normal_(self.monocular_embed, std=.02)
         trunc_normal_(self.binocular_embed_left, std=.02)
         trunc_normal_(self.binocular_embed_right, std=.02)
@@ -423,7 +427,13 @@ class Unified_Binocular(nn.Module):
         B, F, J, C = x.shape
         x = x.reshape(-1, J, C)
         x = self.joints_embed(x)
-        x = x + self.pos_embed
+        if type == "binocular_spatial":
+            x[:, :J // 2, :] += self.pos_embed_left
+            x[:, J // 2:, :] += self.pos_embed_right
+        else:
+            x = x + self.pos_embed
+
+        # task embedding
         if type == "self2self":
             x += self.self2self_embed
         elif type == "left2right":
@@ -434,9 +444,13 @@ class Unified_Binocular(nn.Module):
             x += self.monocular_embed
         elif type == "binocular":
             x += self.binocular_embed
+        elif type == "binocular_spatial":
+            x += self.binocular_embed
         else:
             raise Exception("Undefined task type")
         _, J, C = x.shape
+
+        # temporal embedding
         if type == "binocular":
             x = x.reshape(-1, F, J, C)
             f = F // 2
@@ -472,13 +486,18 @@ class Unified_Binocular(nn.Module):
                 x_left = x[:, :F // 2, :, :]
                 x_right = x[:, F // 2:, :, :]
                 x = (x_left + x_right) * 0.5
+            elif type == "binocular_spatial":
+                x_left = x[:, :, :J // 2, :]
+                x_right = x[:, :, J // 2:, :]
+                x = (x_left + x_right) * 0.5
+
 
         x = self.pre_logits(x)  # [B, F, J, dim_feat]
 
         # xxxx
         if type in ["self2self", "left2right", "right2left"]:
             x = self.interpreter2d(x)
-        elif type in ["monocular", "binocular"]:
+        elif type in ["monocular", "binocular", "binocular_spatial"]:
             x = self.interpreter3d(x)
         else:
             raise Exception("Undefined task type")

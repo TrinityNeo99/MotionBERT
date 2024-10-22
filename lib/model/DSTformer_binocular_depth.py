@@ -373,8 +373,8 @@ class DSTformer_binocular_depth(nn.Module):
         return x
 
     def forward(self, x_left, x_right, x_depth):
-        x_left[:, :, :, -1] = x_depth
-        x_right[:, :, :, -1] = x_depth
+        # x_left[:, :, :, -1] = x_depth
+        # x_right[:, :, :, -1] = x_depth
         x_left = self.forward_s(x_left)
         x_right = self.forward_s(x_right)
         _x_left = rearrange(x_left, 'b t v c -> b t (v c)')

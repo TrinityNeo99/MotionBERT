@@ -21,10 +21,12 @@ from lib.utils.tools import *
 from lib.utils.learning import *
 from lib.utils.utils_data import flip_data
 from lib.data.dataset_motion_2d import PoseTrackDataset2D, InstaVDataset2D
-from lib.data.dataset_motion_3d_binocular_depth import MotionDataset3D  # dataloader
+# from lib.data.dataset_motion_3d_binocular_depth import MotionDataset3D  # dataloader depth
+from lib.data.dataset_motion_3d_binocular import MotionDataset3D  # dataloader
 from lib.data.augmentation import Augmenter2D
 from lib.data.datareader_h36m import DataReaderH36M
-from lib.data.datareader_binocular_depth import DataReaderBinocular  # datareader
+# from lib.data.datareader_binocular_depth import DataReaderBinocular  # datareader depth
+from lib.data.datareader_binocular import DataReaderBinocular  # datareader
 from lib.model.loss import *
 import wandb
 
@@ -73,27 +75,55 @@ def evaluate(args, model_pos, test_loader, datareader):
     results_all = []
     model_pos.eval()
     with torch.no_grad():
-        for batch_input, batch_input_right, batch_gt, batch_depth in tqdm(test_loader):
+        for batch_input, batch_input_right, batch_gt in tqdm(test_loader):
             N, T = batch_gt.shape[:2]
             if torch.cuda.is_available():
                 batch_input = batch_input.cuda()
                 batch_input_right = batch_input_right.cuda()
             if args.no_conf:
                 batch_input = batch_input[:, :, :, :2]
-            if args.flip:
-                batch_input_flip = flip_data(batch_input)
-                batch_input_flip_right = flip_data(batch_input_right)
-                input_merge = torch.cat((batch_input, batch_input_right), dim=1)
-                predicted_3d_pos_1 = model_pos(input_merge, "binocular")  # (N, T, 17, 3)
 
-                input_flip = torch.cat((batch_input_flip, batch_input_flip_right), dim=1)
-                predicted_3d_pos_flip = model_pos(input_flip, "binocular")  # (N, T, 17, 3)
-                predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
-                predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
+            if args.test_task == "binocular":
+                if args.flip:
+                    batch_input_flip = flip_data(batch_input)
+                    batch_input_flip_right = flip_data(batch_input_right)
+                    input_merge = torch.cat((batch_input, batch_input_right), dim=1)
+                    predicted_3d_pos_1 = model_pos(input_merge, "binocular")  # (N, T, 17, 3)
 
+                    input_flip = torch.cat((batch_input_flip, batch_input_flip_right), dim=1)
+                    predicted_3d_pos_flip = model_pos(input_flip, "binocular")  # (N, T, 17, 3)
+                    predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
+                    predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
+                else:
+                    input_merge = torch.cat((batch_input, batch_input_right), dim=1)
+                    predicted_3d_pos = model_pos(input_merge, "binocular")  # (N, T, 17, 3)
+
+            elif args.test_task == "binocular_separate":
+                if args.flip:
+                    batch_input_flip = flip_data(batch_input)
+                    predicted_3d_pos_1 = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
+                    predicted_3d_pos_flip = model_pos(batch_input_flip, "monocular")  # (N, T, 17, 3)
+                    predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
+                    predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
+                else:
+                    predicted_3d_pos = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
+
+            elif args.test_task == "binocular_spatial":
+                if args.flip:
+                    batch_input_flip = flip_data(batch_input)
+                    batch_input_flip_right = flip_data(batch_input_right)
+                    input_merge = torch.cat((batch_input, batch_input_right), dim=2)
+                    predicted_3d_pos_1 = model_pos(input_merge, "binocular_spatial")  # (N, T, 17, 3)
+
+                    input_flip = torch.cat((batch_input_flip, batch_input_flip_right), dim=2)
+                    predicted_3d_pos_flip = model_pos(input_flip, "binocular_spatial")  # (N, T, 17, 3)
+                    predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
+                    predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
+                else:
+                    input_merge = torch.cat((batch_input, batch_input_right), dim=2)
+                    predicted_3d_pos = model_pos(input_merge, "binocular_spatial")  # (N, T, 17, 3)
             else:
-                input_merge = torch.cat((batch_input, batch_input_right), dim=1)
-                predicted_3d_pos = model_pos(input_merge, "binocular")  # (N, T, 17, 3)
+                raise Exception("Undefined task type")
 
             if args.rootrel:
                 predicted_3d_pos[:, :, 0, :] = 0  # [N,T,17,3]
@@ -178,7 +208,7 @@ def evaluate(args, model_pos, test_loader, datareader):
 def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt):
     device = f"cuda:{args.device_ids[0]}"
     model_pos.train()
-    for idx, (batch_input, batch_input_right, batch_gt, batch_depth) in tqdm(enumerate(train_loader)):
+    for idx, (batch_input, batch_input_right, batch_gt) in tqdm(enumerate(train_loader)):
         batch_size = len(batch_input)
         if torch.cuda.is_available():
             batch_input = batch_input.to(device)
@@ -204,6 +234,12 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
             if task == "binocular":
                 input_merge = torch.cat((batch_input, batch_input_right), dim=1)
                 predicted_3d_pos = model_pos(input_merge, task)  # (N, T, 17, 3)
+            elif task == "binocular_separate":
+                predicted_3d_pos = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
+                predicted_3d_pos_ = model_pos(batch_input_right, "monocular")  # (N, T, 17, 3)
+            elif task == "binocular_spatial":
+                input_merge = torch.cat((batch_input, batch_input_right), dim=2)  # concat along spatial
+                predicted_3d_pos = model_pos(input_merge, task)  # (N, T, 34, 3)
             elif task == "monocular":
                 predicted_3d_pos = model_pos(batch_input, task)
             elif task == "left2right":
