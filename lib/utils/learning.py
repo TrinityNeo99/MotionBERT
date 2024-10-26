@@ -96,29 +96,35 @@ def load_backbone(args):
                                    maxlen=args.maxlen, num_joints=args.num_joints)
     elif args.backbone == 'DSTformer_binocular':
         model_backbone = DSTformer_binocular(dim_in=3, dim_out=3, dim_feat=args.dim_feat, dim_rep=args.dim_rep,
-                                   depth=args.depth, num_heads=args.num_heads, mlp_ratio=args.mlp_ratio,
-                                   norm_layer=partial(nn.LayerNorm, eps=1e-6),
-                                   maxlen=args.maxlen, num_joints=args.num_joints)
+                                             depth=args.depth, num_heads=args.num_heads, mlp_ratio=args.mlp_ratio,
+                                             norm_layer=partial(nn.LayerNorm, eps=1e-6),
+                                             maxlen=args.maxlen, num_joints=args.num_joints)
         print("DSTformer_binocular model loaded!")
     elif args.backbone == 'DSTformer_binocular_depth':
         model_backbone = DSTformer_binocular_depth(dim_in=3, dim_out=3, dim_feat=args.dim_feat, dim_rep=args.dim_rep,
-                                   depth=args.depth, num_heads=args.num_heads, mlp_ratio=args.mlp_ratio,
-                                   norm_layer=partial(nn.LayerNorm, eps=1e-6),
-                                   maxlen=args.maxlen, num_joints=args.num_joints)
+                                                   depth=args.depth, num_heads=args.num_heads, mlp_ratio=args.mlp_ratio,
+                                                   norm_layer=partial(nn.LayerNorm, eps=1e-6),
+                                                   maxlen=args.maxlen, num_joints=args.num_joints)
         print("DSTformer_binocular_depth model loaded!")
     elif args.backbone == 'DSTformer_binocular_attention_diff':
-        model_backbone = DSTformer_binocular_attention_diff(dim_in=3, dim_out=3, dim_feat=args.dim_feat, dim_rep=args.dim_rep,
-                                   depth=args.depth, num_heads=args.num_heads, mlp_ratio=args.mlp_ratio,
-                                   norm_layer=partial(nn.LayerNorm, eps=1e-6),
-                                   maxlen=args.maxlen, num_joints=args.num_joints)
-        print("DSTformer_binocular_attention_diff model loaded!")
-    elif args.backbone == 'Unified_Binocular':
-        model_backbone = Unified_Binocular(dim_in=3, dim_out=3, dim_feat=args.dim_feat,
+        model_backbone = DSTformer_binocular_attention_diff(dim_in=3, dim_out=3, dim_feat=args.dim_feat,
                                                             dim_rep=args.dim_rep,
                                                             depth=args.depth, num_heads=args.num_heads,
                                                             mlp_ratio=args.mlp_ratio,
                                                             norm_layer=partial(nn.LayerNorm, eps=1e-6),
-                                                            maxlen=args.maxlen, num_joints=args.num_joints, use_decoder=args.use_decoder)
+                                                            maxlen=args.maxlen, num_joints=args.num_joints)
+        print("DSTformer_binocular_attention_diff model loaded!")
+    elif args.backbone == 'Unified_Binocular':
+        model_backbone = Unified_Binocular(dim_in=3, dim_out=3, dim_feat=args.dim_feat,
+                                           dim_rep=args.dim_rep,
+                                           depth=args.depth, num_heads=args.num_heads,
+                                           mlp_ratio=args.mlp_ratio,
+                                           norm_layer=partial(nn.LayerNorm, eps=1e-6),
+                                           maxlen=args.maxlen, num_joints=args.num_joints,
+                                           use_decoder=args.use_decoder, decoder_dim_feat=args.decoder_dim_feat,
+                                           encoder_left_right_fuse=args.encoder_left_right_fuse,
+                                           multi_task_head=args.multi_task_head,
+                                           shared_interpreter=args.shared_interpreter)
         print("Unified_Binocular model loaded!")
     elif args.backbone == 'TCN':
         from lib.model.model_tcn import PoseTCN

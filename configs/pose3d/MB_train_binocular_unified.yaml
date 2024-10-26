@@ -8,11 +8,14 @@ model_saved_name: null
 # Traning 
 epochs: 120
 checkpoint_frequency: 60
-batch_size: 8
+batch_size: 4
 dropout: 0.0
 learning_rate: 0.0002 #org 0.0002
 weight_decay: 0.01
-lr_decay: 0.99
+lr_decay: 0.99 # org 0.99
+tasks: ["binocular_spatial"]
+test_task: binocular_spatial
+mo_bi_ratio: 5
 
 # Model
 maxlen: 243
@@ -24,11 +27,15 @@ num_heads: 8
 att_fuse: True
 backbone: Unified_Binocular
 use_decoder: False
+decoder_dim_feat: 128
+encoder_left_right_fuse: False
+multi_task_head: True
+shared_interpreter: False # note the tasks
 
 # Data
 data_root: "../dataset/binocular_data/sports/binocular_f243s81"
-subset_list: [binocular]
-dt_file: "binocular_data/sports/coco_17_binocular_depth.pkl"
+subset_list: [binocular_align_all]
+dt_file: "binocular_data/sports/coco_17_binocular_align_all.pkl"
 clip_len: 243
 data_stride: 81
 rootrel: True
@@ -44,9 +51,9 @@ lambda_lv: 0.0
 lambda_lg: 0.0
 lambda_a: 0.0
 lambda_av: 0.0
-lambda_r2l: 0.0
-lambda_l2r: 0.0
-lambda_s2s: 0.0
+lambda_r2l: 0.1
+lambda_l2r: 0.1
+lambda_s2s: 0.1
 
 # Augmentation
 synthetic: False

@@ -249,7 +249,7 @@ def train_with_config(args, opts):
         'batch_size': args.batch_size,
         'shuffle': True,
         'num_workers': 2,
-        'pin_memory': True,
+        'pin_memory': False,
         'prefetch_factor': 4,
         'persistent_workers': True
     }
@@ -258,7 +258,7 @@ def train_with_config(args, opts):
         'batch_size': args.batch_size,
         'shuffle': False,
         'num_workers': 2,
-        'pin_memory': True,
+        'pin_memory': False,
         'prefetch_factor': 4,
         'persistent_workers': True
     }

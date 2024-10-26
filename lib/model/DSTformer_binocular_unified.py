@@ -363,7 +363,8 @@ class Unified_Binocular(nn.Module):
                  depth=5, num_heads=8, mlp_ratio=4,
                  num_joints=17, maxlen=243,
                  qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
-                 norm_layer=nn.LayerNorm, att_fuse=True, use_decoder=False):
+                 norm_layer=nn.LayerNorm, att_fuse=True, use_decoder=False, decoder_dim_feat=256,
+                 encoder_left_right_fuse=False, multi_task_head=False, shared_interpreter=False):
         super().__init__()
         self.num_keypoints = num_joints
 
@@ -398,7 +399,8 @@ class Unified_Binocular(nn.Module):
 
         self.use_decoder = use_decoder
         if use_decoder:
-            self.decoder = DSTformer(dim_in=dim_in, dim_out=3, dim_feat=dim_feat, dim_rep=dim_rep,
+            self.pool = nn.MaxPool2d
+            self.decoder = DSTformer(dim_in=dim_in, dim_out=3, dim_feat=decoder_dim_feat, dim_rep=dim_rep,
                                      depth=2, num_heads=num_heads, mlp_ratio=mlp_ratio,
                                      num_joints=num_joints, maxlen=maxlen,
                                      qkv_bias=qkv_bias, qk_scale=qk_scale, drop_rate=drop_rate,
@@ -409,11 +411,32 @@ class Unified_Binocular(nn.Module):
             self.keypoint_binocular_left_2d = nn.Parameter(torch.zeros(num_joints, dim_feat))
             self.keypoint_binocular_right_2d = nn.Parameter(torch.zeros(num_joints, dim_feat))
             self.keypoint_binocular_3d = nn.Parameter(torch.zeros(num_joints, dim_feat))
+            self.keypoint_binocular_spatial_3d = nn.Parameter(torch.zeros(num_joints, dim_feat))
             self.keypoint_self2self_2d = nn.Parameter(torch.zeros(num_joints, dim_feat))
+            if dim_feat != decoder_dim_feat:
+                self.downsample = nn.Linear(dim_feat, decoder_dim_feat)
+                dim_feat = decoder_dim_feat
+            else:
+                self.downsample = nn.Identity()
 
-        self.interpreter2d = nn.Linear(dim_feat, dim_out)  # the 2d confidence is the last channel
-        self.interpreter3d = nn.Linear(dim_feat, dim_out)
+        self.multi_task_head = multi_task_head
+        if multi_task_head:
+            self.left2right_head = nn.Linear(dim_feat, dim_out)
+            self.right2left_head = nn.Linear(dim_feat, dim_out)
+            self.monocular_head = nn.Linear(dim_feat, dim_out)
+            self.binocular_head = nn.Linear(dim_feat, dim_out)
+            self.self2self_head = nn.Linear(dim_feat, dim_out)
+
+        self.shared_interpreter = shared_interpreter
+        if self.shared_interpreter:
+            self.interpreter2d = nn.Linear(dim_rep, dim_out)  # the 2d confidence is the last channel
+            self.interpreter3d = nn.Linear(dim_rep, dim_out)
+
         self.pos_drop = nn.Dropout(p=drop_rate)
+
+        self.encoder_left_right_fuse = encoder_left_right_fuse
+        if encoder_left_right_fuse:
+            self.left_right_fusion_map = nn.Linear(num_joints * dim_feat, 2)
 
         if dim_rep:
             self.pre_logits = nn.Sequential(OrderedDict([
@@ -473,14 +496,17 @@ class Unified_Binocular(nn.Module):
                 keypoint_tokens = repeat(self.keypoint_monocular_3d, 'j c -> b f j c', b=B, f=F)
             elif type == "binocular":
                 keypoint_tokens = repeat(self.keypoint_binocular_3d, 'j c -> b f j c', b=B, f=F // 2)
+            elif type == "binocular_spatial":
+                keypoint_tokens = repeat(self.keypoint_binocular_spatial_3d, 'j c -> b f j c', b=B, f=F)
             else:
                 raise Exception("Undefined task type")
-            x = torch.cat((keypoint_tokens, x), dim=1)
+            x = torch.cat((keypoint_tokens, x), dim=2)  # along the spatial dimention
+            x = self.downsample(x)
             x = self.decoder(x)
             if type == "binocular":
-                x = x[:, :F // 2, :, :]  # may error
+                x = x[:, :F // 2, :, :]
             else:
-                x = x[:, :F, :, :]
+                x = x[:, :, :self.num_keypoints, :]
         else:
             if type == "binocular":
                 x_left = x[:, :F // 2, :, :]
@@ -489,16 +515,39 @@ class Unified_Binocular(nn.Module):
             elif type == "binocular_spatial":
                 x_left = x[:, :, :J // 2, :]
                 x_right = x[:, :, J // 2:, :]
-                x = (x_left + x_right) * 0.5
-
+                if self.encoder_left_right_fuse:
+                    _x_left = rearrange(x_left, 'b t v c -> b t (v c)')
+                    fusion_weights = self.left_right_fusion_map(_x_left)
+                    fusion_weights = torch.softmax(fusion_weights, dim=-1)
+                    x = x_left * fusion_weights[:, :, 0].unsqueeze(-1).unsqueeze(-1) + x_right * fusion_weights[:, :,
+                                                                                                 1].unsqueeze(
+                        -1).unsqueeze(-1)
+                else:
+                    x = (x_left + x_right) * 0.5
 
         x = self.pre_logits(x)  # [B, F, J, dim_feat]
 
-        # xxxx
-        if type in ["self2self", "left2right", "right2left"]:
-            x = self.interpreter2d(x)
-        elif type in ["monocular", "binocular", "binocular_spatial"]:
-            x = self.interpreter3d(x)
+        if self.multi_task_head:
+            if type == "left2right":
+                x = self.left2right_head(x)
+            elif type == "right2left":
+                x = self.right2left_head(x)
+            elif type == "binocular" or type == "binocular_spatial":
+                x = self.binocular_head(x)
+            elif type == "monocular":
+                x = self.monocular_head(x)
+            elif type == "self2self":
+                x = self.self2self_head(x)
+            else:
+                raise Exception("Undefined task type")
+        elif self.shared_interpreter:
+            # xxxx
+            if type in ["self2self", "left2right", "right2left"]:
+                x = self.interpreter2d(x)
+            elif type in ["monocular", "binocular", "binocular_spatial"]:
+                x = self.interpreter3d(x)
+            else:
+                raise Exception("Undefined task type")
         else:
-            raise Exception("Undefined task type")
+            raise Exception("Undefined head settings")
         return x

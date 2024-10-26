@@ -23,10 +23,12 @@ from lib.utils.utils_data import flip_data
 from lib.data.dataset_motion_2d import PoseTrackDataset2D, InstaVDataset2D
 # from lib.data.dataset_motion_3d_binocular_depth import MotionDataset3D  # dataloader depth
 from lib.data.dataset_motion_3d_binocular import MotionDataset3D  # dataloader
+from lib.data.dataset_motion_3d import MotionDataset3D as MotionDatasetH36m  # dataloader
 from lib.data.augmentation import Augmenter2D
 from lib.data.datareader_h36m import DataReaderH36M
 # from lib.data.datareader_binocular_depth import DataReaderBinocular  # datareader depth
 from lib.data.datareader_binocular import DataReaderBinocular  # datareader
+from lib.data.datareader_h36m import DataReaderBinocular as DataReaderH36m  # datareader
 from lib.model.loss import *
 import wandb
 
@@ -320,7 +322,7 @@ def train_with_config(args, opts):
         'batch_size': args.batch_size,
         'shuffle': True,
         'num_workers': 2,
-        'pin_memory': True,
+        'pin_memory': False,
         'prefetch_factor': 4,
         'persistent_workers': True
     }
@@ -329,7 +331,7 @@ def train_with_config(args, opts):
         'batch_size': args.batch_size,
         'shuffle': False,
         'num_workers': 2,
-        'pin_memory': True,
+        'pin_memory': False,
         'prefetch_factor': 4,
         'persistent_workers': True
     }
@@ -338,6 +340,12 @@ def train_with_config(args, opts):
     test_dataset = MotionDataset3D(args, args.subset_list, 'test')
     train_loader_3d = DataLoader(train_dataset, **trainloader_params)
     test_loader = DataLoader(test_dataset, **testloader_params)
+
+    # human 3.6 m
+    train_dataset_h36m = MotionDatasetH36m(args, args.subset_list, "train")
+    test_dataset_h36m = MotionDatasetH36m(args, args.subset_list, "test")
+    train_loader_3d_h36m = DataReaderH36m(train_dataset_h36m, **trainloader_params)
+    test_loader_3d_h36m = DataReaderH36m(test_dataset_h36m, **testloader_params)
 
     if args.train_2d:
         posetrack = PoseTrackDataset2D()
@@ -348,7 +356,13 @@ def train_with_config(args, opts):
     datareader = DataReaderBinocular(n_frames=args.clip_len, sample_stride=args.sample_stride,
                                      data_stride_train=args.data_stride, data_stride_test=args.clip_len,
                                      dt_root='../dataset', dt_file=args.dt_file)
+
+    datareader_h36m = DataReaderH36m(n_frames=args.clip_len, sample_stride=args.sample_stride,
+                                     data_stride_train=args.data_stride, data_stride_test=args.clip_len,
+                                     dt_root='/mnt/weijiangning-pose-estimation-data/human3.6m', dt_file=args.dt_file)
+
     min_loss = 100000
+    min_loss_e2 = 100000
     model_backbone = load_backbone(args)
     model_params = 0
     for parameter in model_backbone.parameters():
@@ -480,6 +494,7 @@ def train_with_config(args, opts):
                 wandb.log({"loss_l2r": losses['l2r'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_s2s": losses['s2s'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_total": losses['total'].avg, "epoch": epoch + 1})
+                wandb.log({"lr": lr, "epoch": epoch + 1})
 
             # Decay learning rate exponentially
             lr *= lr_decay
@@ -497,11 +512,11 @@ def train_with_config(args, opts):
             if e1 < min_loss:
                 min_loss = e1
                 # save_checkpoint(chk_path_best, epoch, lr, optimizer, model_pos, min_loss)
-                min_e1 = e1
-                min_e2 = e2
-            print(f"The best results (minimal error) P1: {min_e1 * 1000} mm, P2: {min_e2 * 1000} mm")
-            wandb.log({"Best Error P1": min_e1 * 1000, "epoch": epoch + 1})
-            wandb.log({"Best Error P2": min_e2 * 1000, "epoch": epoch + 1})
+            if e2 < min_loss_e2:
+                min_loss_e2 = e2
+            print(f"The best results (minimal error) P1: {min_loss * 1000} mm, P2: {min_loss_e2 * 1000} mm")
+            wandb.log({"Best Error P1": min_loss * 1000, "epoch": epoch + 1})
+            wandb.log({"Best Error P2": min_loss_e2 * 1000, "epoch": epoch + 1})
 
     if opts.evaluate:
         e1, e2, results_all = evaluate(args, model_pos, test_loader, datareader)

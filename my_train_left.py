@@ -73,7 +73,13 @@ def evaluate(args, model_pos, test_loader, datareader):
     results_all = []
     model_pos.eval()
     with torch.no_grad():
-        for batch_input, _, batch_gt in tqdm(test_loader):
+        for batch_input_left, batch_input_right, batch_gt in tqdm(test_loader):
+            if args.direction == "left":
+                batch_input = batch_input_left
+            elif args.direction == "right":
+                batch_input = batch_input_right
+            else:
+                raise Exception("No Implementation")
             N, T = batch_gt.shape[:2]
             if torch.cuda.is_available():
                 batch_input = batch_input.cuda()
@@ -170,7 +176,11 @@ def evaluate(args, model_pos, test_loader, datareader):
 
 def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt):
     model_pos.train()
-    for idx, (batch_input, _, batch_gt) in tqdm(enumerate(train_loader)):
+    for idx, (batch_input_left, batch_input_right, batch_gt) in tqdm(enumerate(train_loader)):
+        if args.direction == "left":
+            batch_input = batch_input_left
+        elif args.direction == "right":
+            batch_input = batch_input_right
         batch_size = len(batch_input)
         if torch.cuda.is_available():
             # batch_input = batch_input.cuda()
@@ -240,7 +250,7 @@ def train_with_config(args, opts):
         'batch_size': args.batch_size,
         'shuffle': True,
         'num_workers': 2,
-        'pin_memory': True,
+        'pin_memory': False,
         'prefetch_factor': 4,
         'persistent_workers': True
     }
@@ -249,7 +259,7 @@ def train_with_config(args, opts):
         'batch_size': args.batch_size,
         'shuffle': False,
         'num_workers': 2,
-        'pin_memory': True,
+        'pin_memory': False,
         'prefetch_factor': 4,
         'persistent_workers': True
     }

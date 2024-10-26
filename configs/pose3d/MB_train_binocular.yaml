@@ -26,8 +26,8 @@ backbone: DSTformer_binocular
 
 # Data
 data_root: "../dataset/binocular_data/sports/binocular_f243s81"
-subset_list: [binocular]
-dt_file: "binocular_data/sports/coco_17_binocular_depth.pkl"
+subset_list: [binocular_align_all]
+dt_file: "binocular_data/sports/coco_17_binocular_align_all.pkl"
 clip_len: 243
 data_stride: 81
 rootrel: True
@@ -55,5 +55,5 @@ mask_T_ratio: 0.
 noise: False
 
 # Training
-device_ids: [0]
+device_ids: [2,3]
 #device_ids: [2,3,4,5]
