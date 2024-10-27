@@ -7,7 +7,7 @@ partial_train: null
 # Traning 
 epochs: 120
 checkpoint_frequency: 30
-batch_size: 32 
+batch_size: 4
 dropout: 0.0
 learning_rate: 0.0002
 weight_decay: 0.01
@@ -22,10 +22,18 @@ dim_rep: 512
 num_heads: 8
 att_fuse: True
 
+## unified model for test
+backbone: Unified_Binocular
+use_decoder: False
+decoder_dim_feat: 128
+encoder_left_right_fuse: False
+multi_task_head: True
+shared_interpreter: False # note the tasks
+
 # Data
-data_root: data/motion3d/MB3D_f243s81/
+data_root: "/mnt/weijiangning-pose-estimation-data/human3.6m"
 subset_list: [H36M-SH]
-dt_file: h36m_sh_conf_cam_source_final.pkl
+dt_file: "h36m_sh_conf_cam_source_final.pkl"
 clip_len: 243
 data_stride: 81
 rootrel: True
@@ -49,3 +57,4 @@ mask_ratio: 0.
 mask_T_ratio: 0.
 noise: False
 
+device_ids: [2,3]

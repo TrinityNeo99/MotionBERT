@@ -28,8 +28,9 @@ from lib.data.augmentation import Augmenter2D
 from lib.data.datareader_h36m import DataReaderH36M
 # from lib.data.datareader_binocular_depth import DataReaderBinocular  # datareader depth
 from lib.data.datareader_binocular import DataReaderBinocular  # datareader
-from lib.data.datareader_h36m import DataReaderBinocular as DataReaderH36m  # datareader
+from lib.data.datareader_h36m import DataReaderH36M  # datareader
 from lib.model.loss import *
+from train import evaluate as evaluateH36m
 import wandb
 
 
@@ -216,20 +217,11 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
             batch_input = batch_input.to(device)
             batch_input_right = batch_input_right.to(device)
             batch_gt = batch_gt.to(device)
-        with torch.no_grad():
-            if args.no_conf:
-                batch_input = batch_input[:, :, :, :2]
-                batch_input_right = batch_input_right[:, :, :, :2]
-            if not has_3d:
-                conf = copy.deepcopy(batch_input[:, :, :, 2:])  # For 2D data, weight/confidence is at the last channel
-            if args.rootrel:
-                batch_gt = batch_gt - batch_gt[:, :, 0:1, :]
-            else:
-                batch_gt[:, :, :, 2] = batch_gt[:, :, :, 2] - batch_gt[:, 0:1, 0:1,
-                                                              2]  # Place the depth of first frame root to 0.
-            if args.mask or args.noise:
-                batch_input = args.aug.augment2D(batch_input, noise=(args.noise and has_gt), mask=args.mask)
-                batch_input_right = args.aug.augment2D(batch_input_right, noise=(args.noise and has_gt), mask=args.mask)
+
+        batch_input, batch_input_right, batch_gt = batch_preprocess(batch_input, batch_input_right, batch_gt, args,
+                                                                    has_3d,
+                                                                    has_gt)
+
         # Predict 3D poses
         for task in args.tasks:
             # TODO 可以加一个判断条件，根据数据的类型判断是 binocular 还是 monocular
@@ -308,6 +300,209 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
         optimizer.step()
 
 
+def batch_preprocess(batch_input, batch_input_right, batch_gt, args, has_3d, has_gt):
+    with torch.no_grad():
+        if args.no_conf:
+            batch_input = batch_input[:, :, :, :2]
+            if batch_input_right is not None:
+                batch_input_right = batch_input_right[:, :, :, :2]
+        if not has_3d:
+            conf = copy.deepcopy(batch_input[:, :, :, 2:])  # For 2D data, weight/confidence is at the last channel
+        if args.rootrel:
+            batch_gt = batch_gt - batch_gt[:, :, 0:1, :]
+        else:
+            batch_gt[:, :, :, 2] = batch_gt[:, :, :, 2] - batch_gt[:, 0:1, 0:1,
+                                                          2]  # Place the depth of first frame root to 0.
+        if args.mask or args.noise:
+            batch_input = args.aug.augment2D(batch_input, noise=(args.noise and has_gt), mask=args.mask)
+            if batch_input_right is not None:
+                batch_input_right = args.aug.augment2D(batch_input_right, noise=(args.noise and has_gt), mask=args.mask)
+
+    return batch_input, batch_input_right, batch_gt
+
+
+def train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input, batch_gt):
+    device = f"cuda:{args.device_ids[0]}"
+    if torch.cuda.is_available():
+        batch_input = batch_input.to(device)
+        batch_gt = batch_gt.to(device)
+    batch_input, _, batch_gt = batch_preprocess(batch_input, None, batch_gt, args, has_3d, has_gt)
+    predicted_3d_pos = model_pos(batch_input, "monocular")
+    optimizer.zero_grad()
+    batch_size = len(batch_input)
+    if has_3d:
+        loss_3d_pos = loss_mpjpe(predicted_3d_pos, batch_gt)
+        loss_3d_scale = n_mpjpe(predicted_3d_pos, batch_gt)
+        loss_3d_velocity = loss_velocity(predicted_3d_pos, batch_gt)
+        loss_lv = loss_limb_var(predicted_3d_pos)
+        loss_lg = loss_limb_gt(predicted_3d_pos, batch_gt)
+        loss_a = loss_angle(predicted_3d_pos, batch_gt)
+        loss_av = loss_angle_velocity(predicted_3d_pos, batch_gt)
+
+        loss_total = loss_3d_pos + \
+                     args.lambda_scale * loss_3d_scale + \
+                     args.lambda_3d_velocity * loss_3d_velocity + \
+                     args.lambda_lv * loss_lv + \
+                     args.lambda_lg * loss_lg + \
+                     args.lambda_a * loss_a + \
+                     args.lambda_av * loss_av
+        losses['3d_pos'].update(loss_3d_pos.item(), batch_size)
+        losses['3d_scale'].update(loss_3d_scale.item(), batch_size)
+        losses['3d_velocity'].update(loss_3d_velocity.item(), batch_size)
+        losses['lv'].update(loss_lv.item(), batch_size)
+        losses['lg'].update(loss_lg.item(), batch_size)
+        losses['angle'].update(loss_a.item(), batch_size)
+        losses['angle_velocity'].update(loss_av.item(), batch_size)
+        losses['total'].update(loss_total.item(), batch_size)
+    else:
+        loss_2d_proj = loss_2d_weighted(predicted_3d_pos, batch_gt, conf)
+        loss_total = loss_2d_proj
+        losses['2d_proj'].update(loss_2d_proj.item(), batch_size)
+        losses['total'].update(loss_total.item(), batch_size)
+    return loss_total
+
+
+def train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input, batch_input_right, batch_gt):
+    device = f"cuda:{args.device_ids[0]}"
+    if torch.cuda.is_available():
+        batch_input = batch_input.to(device)
+        batch_input_right = batch_input_right.to(device)
+        batch_gt = batch_gt.to(device)
+    batch_input, batch_input_right, batch_gt = batch_preprocess(batch_input, batch_input_right, batch_gt, args, has_3d,
+                                                                has_gt)
+    for task in args.tasks:
+        if task == "binocular":
+            input_merge = torch.cat((batch_input, batch_input_right), dim=1)
+            predicted_3d_pos = model_pos(input_merge, task)  # (N, T, 17, 3)
+        elif task == "binocular_separate":
+            predicted_3d_pos = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
+            predicted_3d_pos_ = model_pos(batch_input_right, "monocular")  # (N, T, 17, 3)
+        elif task == "binocular_spatial":
+            input_merge = torch.cat((batch_input, batch_input_right), dim=2)  # concat along spatial
+            predicted_3d_pos = model_pos(input_merge, task)  # (N, T, 34, 3)
+        elif task == "left2right":
+            predict_2d_right = model_pos(batch_input, task)
+        elif task == "right2left":
+            predict_2d_left = model_pos(batch_input_right, task)
+        elif task == "self2self":
+            drop_out = nn.Dropout(p=0.2)
+            input = drop_out(batch_input)
+            predict_2d_self = model_pos(input, task)
+        elif task == "monocular":
+            pass  # do nothing
+        else:
+            raise Exception("No Implementation")
+    optimizer.zero_grad()
+    batch_size = len(batch_input)
+    if has_3d:
+        loss_3d_pos = loss_mpjpe(predicted_3d_pos, batch_gt)
+        loss_3d_scale = n_mpjpe(predicted_3d_pos, batch_gt)
+        loss_3d_velocity = loss_velocity(predicted_3d_pos, batch_gt)
+        loss_lv = loss_limb_var(predicted_3d_pos)
+        loss_lg = loss_limb_gt(predicted_3d_pos, batch_gt)
+        loss_a = loss_angle(predicted_3d_pos, batch_gt)
+        loss_av = loss_angle_velocity(predicted_3d_pos, batch_gt)
+
+        if "left2right" in args.tasks:
+            loss_r2l = loss_mpjpe(predict_2d_left, batch_input)
+            losses['r2l'].update(loss_r2l.item(), batch_size)
+        else:
+            loss_r2l = 0
+
+        if "right2left" in args.tasks:
+            loss_l2r = loss_mpjpe(predict_2d_right, batch_input_right)
+            losses['l2r'].update(loss_l2r.item(), batch_size)
+        else:
+            loss_l2r = 0
+
+        if "self2self" in args.tasks:
+            loss_s2s = loss_mpjpe(batch_input, predict_2d_self)
+            losses['s2s'].update(loss_s2s.item(), batch_size)
+        else:
+            loss_s2s = 0
+
+        loss_total = loss_3d_pos + \
+                     args.lambda_scale * loss_3d_scale + \
+                     args.lambda_3d_velocity * loss_3d_velocity + \
+                     args.lambda_lv * loss_lv + \
+                     args.lambda_lg * loss_lg + \
+                     args.lambda_a * loss_a + \
+                     args.lambda_av * loss_av + \
+                     args.lambda_r2l * loss_r2l + \
+                     args.lambda_l2r * loss_l2r + args.lambda_s2s * loss_s2s
+
+        losses['3d_pos'].update(loss_3d_pos.item(), batch_size)
+        losses['3d_scale'].update(loss_3d_scale.item(), batch_size)
+        losses['3d_velocity'].update(loss_3d_velocity.item(), batch_size)
+        losses['lv'].update(loss_lv.item(), batch_size)
+        losses['lg'].update(loss_lg.item(), batch_size)
+        losses['angle'].update(loss_a.item(), batch_size)
+        losses['angle_velocity'].update(loss_av.item(), batch_size)
+        losses['total'].update(loss_total.item(), batch_size)
+    else:
+        loss_2d_proj = loss_2d_weighted(predicted_3d_pos, batch_gt, conf)
+        loss_total = loss_2d_proj
+        losses['2d_proj'].update(loss_2d_proj.item(), batch_size)
+        losses['total'].update(loss_total.item(), batch_size)
+    return loss_total
+
+
+def train_epoch_mix(args, model_pos, monocular_dataloader, binocular_dataloader, losses, optimizer, has_3d, has_gt):
+    model_pos.train()
+    binocular_dataloader_iter = iter(binocular_dataloader)
+    for idx, (batch_input_mo, batch_gt_mo) in tqdm(enumerate(monocular_dataloader)):
+        loss_total = train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input_mo, batch_gt_mo)
+        loss_total.backward()
+        optimizer.step()
+
+        ## binocular mix, another minibatch
+        if idx % args.mo_bi_ratio == 0:
+            try:
+                batch_input_bi, batch_input_right_bi, batch_gt_bi = next(binocular_dataloader_iter)
+            except StopIteration:
+                binocular_dataloader_iter = iter(binocular_dataloader)
+                batch_input_bi, batch_input_right_bi, batch_gt_bi = next(binocular_dataloader_iter)
+            loss_total = train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input_bi,
+                                         batch_input_right_bi, batch_gt_bi)
+            loss_total.backward()
+            optimizer.step()
+
+
+def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataloader, binocular_dataloader, losses,
+                                             optimizer, has_3d, has_gt):
+    model_pos.train()
+    monocular_step = len(monocular_dataloader)
+    ratio = args.mo_bi_ratio
+    total_step = monocular_step + monocular_step // ratio
+    monocular_dataloader_iter = iter(monocular_dataloader)
+    binocular_dataloader_iter = iter(binocular_dataloader)
+    with tqdm(total=total_step) as pbar:
+        pbar.set_description("training...")
+        for i in range(total_step):
+            if i % (ratio + 1) < ratio:
+                # 使用第一个数据集
+                try:
+                    batch_input, batch_gt = next(monocular_dataloader_iter)
+                except StopIteration:
+                    # 重新开始第一个数据集迭代
+                    monocular_dataloader_iter = iter(monocular_dataloader)
+                    batch_input, batch_gt = next(monocular_dataloader_iter)
+                loss_total = train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input, batch_gt)
+            else:
+                # 使用第二个数据集
+                try:
+                    batch_input, batch_input_right, batch_gt = next(binocular_dataloader_iter)
+                except StopIteration:
+                    # 重新开始第二个数据集迭代
+                    binocular_dataloader_iter = iter(binocular_dataloader)
+                    batch_input, batch_input_right, batch_gt = next(binocular_dataloader_iter)
+                loss_total = train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input,
+                                             batch_input_right, batch_gt)
+            pbar.update(1)
+            loss_total.backward()
+            optimizer.step()
+
+
 def train_with_config(args, opts):
     print(args)
     try:
@@ -339,13 +534,23 @@ def train_with_config(args, opts):
     train_dataset = MotionDataset3D(args, args.subset_list, 'train')
     test_dataset = MotionDataset3D(args, args.subset_list, 'test')
     train_loader_3d = DataLoader(train_dataset, **trainloader_params)
-    test_loader = DataLoader(test_dataset, **testloader_params)
+    test_loader_3d = DataLoader(test_dataset, **testloader_params)
 
-    # human 3.6 m
-    train_dataset_h36m = MotionDatasetH36m(args, args.subset_list, "train")
-    test_dataset_h36m = MotionDatasetH36m(args, args.subset_list, "test")
-    train_loader_3d_h36m = DataReaderH36m(train_dataset_h36m, **trainloader_params)
-    test_loader_3d_h36m = DataReaderH36m(test_dataset_h36m, **testloader_params)
+    if "monocular" in args.tasks:
+        # human 3.6 m
+        temp_args = copy.deepcopy(args)
+        temp_args.data_root = args.data_root_h36m
+        temp_args.subset_list = args.subset_list_h36m
+        temp_args.dt_file = args.dt_file_h36m
+        train_dataset_h36m = MotionDatasetH36m(temp_args, temp_args.subset_list, "train")
+        test_dataset_h36m = MotionDatasetH36m(temp_args, temp_args.subset_list, "test")
+        train_loader_3d_h36m = DataLoader(train_dataset_h36m, **trainloader_params)
+        test_loader_3d_h36m = DataLoader(test_dataset_h36m, **testloader_params)
+
+        datareader_h36m = DataReaderH36M(n_frames=temp_args.clip_len, sample_stride=temp_args.sample_stride,
+                                         data_stride_train=temp_args.data_stride, data_stride_test=temp_args.clip_len,
+                                         dt_root='/mnt/weijiangning-pose-estimation-data/human3.6m',
+                                         dt_file=temp_args.dt_file)
 
     if args.train_2d:
         posetrack = PoseTrackDataset2D()
@@ -357,12 +562,10 @@ def train_with_config(args, opts):
                                      data_stride_train=args.data_stride, data_stride_test=args.clip_len,
                                      dt_root='../dataset', dt_file=args.dt_file)
 
-    datareader_h36m = DataReaderH36m(n_frames=args.clip_len, sample_stride=args.sample_stride,
-                                     data_stride_train=args.data_stride, data_stride_test=args.clip_len,
-                                     dt_root='/mnt/weijiangning-pose-estimation-data/human3.6m', dt_file=args.dt_file)
-
     min_loss = 100000
     min_loss_e2 = 100000
+    min_loss_h36m = 100000
+    min_loss_e2_h36m = 100000
     model_backbone = load_backbone(args)
     model_params = 0
     for parameter in model_backbone.parameters():
@@ -411,6 +614,8 @@ def train_with_config(args, opts):
                                                                    len(instav_loader_2d) + len(posetrack_loader_2d)))
         else:
             print('INFO: Training on {}(3D) batches'.format(len(train_loader_3d)))
+            if "monocular" in args.tasks:
+                print('INFO: Training on {}(3D) batches H36M'.format(len(train_loader_3d_h36m)))
         if opts.resume:
             st = checkpoint['epoch']
             if 'optimizer' in checkpoint and checkpoint['optimizer'] is not None:
@@ -449,7 +654,12 @@ def train_with_config(args, opts):
             if args.train_2d and (epoch >= args.pretrain_3d_curriculum):
                 train_epoch(args, model_pos, posetrack_loader_2d, losses, optimizer, has_3d=False, has_gt=True)
                 train_epoch(args, model_pos, instav_loader_2d, losses, optimizer, has_3d=False, has_gt=False)
-            train_epoch(args, model_pos, train_loader_3d, losses, optimizer, has_3d=True, has_gt=True)
+            if not args.train_mix:
+                train_epoch(args, model_pos, train_loader_3d, losses, optimizer, has_3d=True, has_gt=True)
+            elif args.train_mix:
+                # train_epoch_mix(args, model_pos, train_loader_3d_h36m, train_loader_3d, losses, optimizer, has_3d=True, has_gt=True)
+                train_epoch_mix_single_dataset_per_batch(args, model_pos, train_loader_3d_h36m, train_loader_3d, losses,
+                                                         optimizer, has_3d=True, has_gt=True)
             elapsed = (time() - start_time) / 60
 
             if args.no_eval:
@@ -459,26 +669,13 @@ def train_with_config(args, opts):
                     lr,
                     losses['3d_pos'].avg))
             else:
-                e1, e2, results_all = evaluate(args, model_pos, test_loader, datareader)
-                print('[%d] time %.2f lr %f 3d_train %f e1 %f e2 %f' % (
+                e1, e2, results_all = evaluate(args, model_pos, test_loader_3d, datareader)
+                print('Sports: [%d] time %.2f lr %f 3d_train %f e1 %f e2 %f' % (
                     epoch + 1,
                     elapsed,
                     lr,
                     losses['3d_pos'].avg,
                     e1, e2))
-                # train_writer.add_scalar('Error P1', e1, epoch + 1)
-                # train_writer.add_scalar('Error P2', e2, epoch + 1)
-                # train_writer.add_scalar('loss_3d_pos', losses['3d_pos'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_2d_proj', losses['2d_proj'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_3d_scale', losses['3d_scale'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_3d_velocity', losses['3d_velocity'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_lv', losses['lv'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_lg', losses['lg'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_a', losses['angle'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_av', losses['angle_velocity'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_total', losses['total'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_r2l', losses['r2l'].avg, epoch + 1)
-                # train_writer.add_scalar('loss_lr2', losses['l2r'].avg, epoch + 1)
 
                 wandb.log({"Error P1": e1 * 1000, "epoch": epoch + 1})
                 wandb.log({"Error P2": e2 * 1000, "epoch": epoch + 1})
@@ -495,6 +692,17 @@ def train_with_config(args, opts):
                 wandb.log({"loss_s2s": losses['s2s'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_total": losses['total'].avg, "epoch": epoch + 1})
                 wandb.log({"lr": lr, "epoch": epoch + 1})
+
+                if "monocular" in args.tasks:
+                    e1_h36m, e2_h36m, results_all = evaluateH36m(args, model_pos, test_loader_3d_h36m, datareader_h36m)
+                    wandb.log({"H36m Error P1": e1_h36m, "epoch": epoch + 1})
+                    wandb.log({"H36m Error P2": e2_h36m, "epoch": epoch + 1})
+                    print('Human3.6N: [%d] time %.2f lr %f 3d_train %f e1 %f e2 %f' % (
+                        epoch + 1,
+                        elapsed,
+                        lr,
+                        losses['3d_pos'].avg,
+                        e1_h36m, e2_h36m))
 
             # Decay learning rate exponentially
             lr *= lr_decay
@@ -514,9 +722,21 @@ def train_with_config(args, opts):
                 # save_checkpoint(chk_path_best, epoch, lr, optimizer, model_pos, min_loss)
             if e2 < min_loss_e2:
                 min_loss_e2 = e2
-            print(f"The best results (minimal error) P1: {min_loss * 1000} mm, P2: {min_loss_e2 * 1000} mm")
+            print(
+                f"Sports Binocular ==> The best results (minimal error) P1: {min_loss * 1000} mm, P2: {min_loss_e2 * 1000} mm")
             wandb.log({"Best Error P1": min_loss * 1000, "epoch": epoch + 1})
             wandb.log({"Best Error P2": min_loss_e2 * 1000, "epoch": epoch + 1})
+
+            if "monocular" in args.tasks:
+                # H3.6M
+                if e1_h36m < min_loss_h36m:
+                    min_loss_h36m = e1_h36m
+                if e2_h36m < min_loss_e2_h36m:
+                    min_loss_e2_h36m = e2_h36m
+                print(
+                    f"Human 3.6M ==> The best results (minimal error) P1: {min_loss_h36m} mm, P2: {min_loss_e2_h36m} mm")
+                wandb.log({"H36m Best Error P1": min_loss_h36m, "epoch": epoch + 1})
+                wandb.log({"H36m Best Error P2": min_loss_e2_h36m, "epoch": epoch + 1})
 
     if opts.evaluate:
         e1, e2, results_all = evaluate(args, model_pos, test_loader, datareader)

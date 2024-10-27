@@ -446,7 +446,7 @@ class Unified_Binocular(nn.Module):
         else:
             self.pre_logits = nn.Identity()
 
-    def forward(self, x, type="self2self"):
+    def forward(self, x, type="monocular"):
         B, F, J, C = x.shape
         x = x.reshape(-1, J, C)
         x = self.joints_embed(x)

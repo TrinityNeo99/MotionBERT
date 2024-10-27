@@ -26,6 +26,7 @@ from lib.data.augmentation import Augmenter2D
 from lib.data.datareader_h36m import DataReaderH36M
 from lib.data.datareader_binocular_pingpong import DataReaderBinocular
 from lib.model.loss import *
+import wandb
 
 
 def parse_args():
@@ -171,11 +172,12 @@ def evaluate(args, model_pos, test_loader, datareader):
 
 def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt):
     model_pos.train()
+    device = f"cuda:{args.device_ids[0]}"
     for idx, (batch_input, batch_gt) in tqdm(enumerate(train_loader)):
         batch_size = len(batch_input)
         if torch.cuda.is_available():
-            batch_input = batch_input.cuda()
-            batch_gt = batch_gt.cuda()
+            batch_input = batch_input.to(device)
+            batch_gt = batch_gt.to(device)
         with torch.no_grad():
             if args.no_conf:
                 batch_input = batch_input[:, :, :, :2]
@@ -269,7 +271,7 @@ def train_with_config(args, opts):
 
     datareader = DataReaderH36M(n_frames=args.clip_len, sample_stride=args.sample_stride,
                                 data_stride_train=args.data_stride, data_stride_test=args.clip_len,
-                                dt_root='../dataset/human3.6m', dt_file=args.dt_file)
+                                dt_root='/mnt/weijiangning-pose-estimation-data/human3.6m', dt_file=args.dt_file)
     min_loss = 100000
     model_backbone = load_backbone(args)
     model_params = 0
@@ -279,7 +281,7 @@ def train_with_config(args, opts):
 
     if torch.cuda.is_available():
         model_backbone = nn.DataParallel(model_backbone, args.device_ids)
-        model_backbone = model_backbone.cuda()
+        model_backbone = model_backbone.cuda(device=args.device_ids[0])
 
     if args.finetune:
         if opts.resume or opts.evaluate:
@@ -371,17 +373,30 @@ def train_with_config(args, opts):
                     lr,
                     losses['3d_pos'].avg,
                     e1, e2))
-                train_writer.add_scalar('Error P1', e1, epoch + 1)
-                train_writer.add_scalar('Error P2', e2, epoch + 1)
-                train_writer.add_scalar('loss_3d_pos', losses['3d_pos'].avg, epoch + 1)
-                train_writer.add_scalar('loss_2d_proj', losses['2d_proj'].avg, epoch + 1)
-                train_writer.add_scalar('loss_3d_scale', losses['3d_scale'].avg, epoch + 1)
-                train_writer.add_scalar('loss_3d_velocity', losses['3d_velocity'].avg, epoch + 1)
-                train_writer.add_scalar('loss_lv', losses['lv'].avg, epoch + 1)
-                train_writer.add_scalar('loss_lg', losses['lg'].avg, epoch + 1)
-                train_writer.add_scalar('loss_a', losses['angle'].avg, epoch + 1)
-                train_writer.add_scalar('loss_av', losses['angle_velocity'].avg, epoch + 1)
-                train_writer.add_scalar('loss_total', losses['total'].avg, epoch + 1)
+                # train_writer.add_scalar('Error P1', e1, epoch + 1)
+                # train_writer.add_scalar('Error P2', e2, epoch + 1)
+                # train_writer.add_scalar('loss_3d_pos', losses['3d_pos'].avg, epoch + 1)
+                # train_writer.add_scalar('loss_2d_proj', losses['2d_proj'].avg, epoch + 1)
+                # train_writer.add_scalar('loss_3d_scale', losses['3d_scale'].avg, epoch + 1)
+                # train_writer.add_scalar('loss_3d_velocity', losses['3d_velocity'].avg, epoch + 1)
+                # train_writer.add_scalar('loss_lv', losses['lv'].avg, epoch + 1)
+                # train_writer.add_scalar('loss_lg', losses['lg'].avg, epoch + 1)
+                # train_writer.add_scalar('loss_a', losses['angle'].avg, epoch + 1)
+                # train_writer.add_scalar('loss_av', losses['angle_velocity'].avg, epoch + 1)
+                # train_writer.add_scalar('loss_total', losses['total'].avg, epoch + 1)
+
+                wandb.log({"Error P1": e1, "epoch": epoch + 1})
+                wandb.log({"Error P2": e2, "epoch": epoch + 1})
+                wandb.log({"loss_3d_pos": losses['3d_pos'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_2d_project": losses['2d_proj'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_3d_scale": losses['3d_scale'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_3d_velocity": losses['3d_velocity'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_lv": losses['lv'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_lg": losses['lg'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_angle": losses['angle'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_angle_velocity": losses['angle_velocity'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_total": losses['total'].avg, "epoch": epoch + 1})
+                wandb.log({"lr": lr, "epoch": epoch + 1})
 
             # Decay learning rate exponentially
             lr *= lr_decay
@@ -400,12 +415,27 @@ def train_with_config(args, opts):
                 min_loss = e1
                 save_checkpoint(chk_path_best, epoch, lr, optimizer, model_pos, min_loss)
 
+            wandb.log({"Best Error P1": min_loss, "epoch": epoch + 1})
+
     if opts.evaluate:
         e1, e2, results_all = evaluate(args, model_pos, test_loader, datareader)
+
+def wandb_init(args):
+    wandb.login(key="610ea58ece04cbfb08fe53c2d852fccf1833d910", force=True)
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="pose_estimation",
+        # name="ASE_GCN_baseline",
+        name=args.model_saved_name,
+        # track hyperparameters and run metadata
+        config=args
+    )
 
 
 if __name__ == "__main__":
     opts = parse_args()
     set_random_seed(opts.seed)
     args = get_config(opts.config)
+    args.model_saved_name = os.path.basename(opts.checkpoint)
+    wandb_init(args)
     train_with_config(args, opts)
