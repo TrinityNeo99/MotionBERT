@@ -32,6 +32,7 @@ from lib.data.datareader_h36m import DataReaderH36M  # datareader
 from lib.model.loss import *
 from train import evaluate as evaluateH36m
 import wandb
+import shutil
 
 
 def parse_args():
@@ -80,7 +81,7 @@ def evaluate(args, model_pos, test_loader, datareader):
     with torch.no_grad():
         for batch_input, batch_input_right, batch_gt in tqdm(test_loader):
             N, T = batch_gt.shape[:2]
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and torch.cuda.get_device_name(args.device_ids[0]) != "NVIDIA GeForce RTX 3090":
                 batch_input = batch_input.cuda()
                 batch_input_right = batch_input_right.cuda()
             if args.no_conf:
@@ -217,11 +218,9 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
             batch_input = batch_input.to(device)
             batch_input_right = batch_input_right.to(device)
             batch_gt = batch_gt.to(device)
-
         batch_input, batch_input_right, batch_gt = batch_preprocess(batch_input, batch_input_right, batch_gt, args,
                                                                     has_3d,
                                                                     has_gt)
-
         # Predict 3D poses
         for task in args.tasks:
             # TODO 可以加一个判断条件，根据数据的类型判断是 binocular 还是 monocular
@@ -447,27 +446,6 @@ def train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_in
     return loss_total
 
 
-def train_epoch_mix(args, model_pos, monocular_dataloader, binocular_dataloader, losses, optimizer, has_3d, has_gt):
-    model_pos.train()
-    binocular_dataloader_iter = iter(binocular_dataloader)
-    for idx, (batch_input_mo, batch_gt_mo) in tqdm(enumerate(monocular_dataloader)):
-        loss_total = train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input_mo, batch_gt_mo)
-        loss_total.backward()
-        optimizer.step()
-
-        ## binocular mix, another minibatch
-        if idx % args.mo_bi_ratio == 0:
-            try:
-                batch_input_bi, batch_input_right_bi, batch_gt_bi = next(binocular_dataloader_iter)
-            except StopIteration:
-                binocular_dataloader_iter = iter(binocular_dataloader)
-                batch_input_bi, batch_input_right_bi, batch_gt_bi = next(binocular_dataloader_iter)
-            loss_total = train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input_bi,
-                                         batch_input_right_bi, batch_gt_bi)
-            loss_total.backward()
-            optimizer.step()
-
-
 def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataloader, binocular_dataloader, losses,
                                              optimizer, has_3d, has_gt):
     model_pos.train()
@@ -505,7 +483,14 @@ def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataload
 
 def train_with_config(args, opts):
     print(args)
+    print("*****************Training Start...")
+    for d in args.device_ids:
+        print(torch.cuda.get_device_name(d))
     try:
+        if os.path.exists(opts.checkpoint):
+            decision = input("There already exist a latest_epoch, delete? [y/n]")
+            if decision == "y":
+                shutil.rmtree(opts.checkpoint)
         os.makedirs(opts.checkpoint)
     except OSError as e:
         if e.errno != errno.EEXIST:
@@ -517,7 +502,7 @@ def train_with_config(args, opts):
         'batch_size': args.batch_size,
         'shuffle': True,
         'num_workers': 2,
-        'pin_memory': False,
+        'pin_memory': True,
         'prefetch_factor': 4,
         'persistent_workers': True
     }
@@ -526,7 +511,7 @@ def train_with_config(args, opts):
         'batch_size': args.batch_size,
         'shuffle': False,
         'num_workers': 2,
-        'pin_memory': False,
+        'pin_memory': True,
         'prefetch_factor': 4,
         'persistent_workers': True
     }
@@ -591,6 +576,7 @@ def train_with_config(args, opts):
             model_pos = model_backbone
     else:
         chk_filename = os.path.join(opts.checkpoint, "latest_epoch.bin")
+
         if os.path.exists(chk_filename):
             opts.resume = chk_filename
         if opts.resume or opts.evaluate:
@@ -656,8 +642,7 @@ def train_with_config(args, opts):
                 train_epoch(args, model_pos, instav_loader_2d, losses, optimizer, has_3d=False, has_gt=False)
             if not args.train_mix:
                 train_epoch(args, model_pos, train_loader_3d, losses, optimizer, has_3d=True, has_gt=True)
-            elif args.train_mix:
-                # train_epoch_mix(args, model_pos, train_loader_3d_h36m, train_loader_3d, losses, optimizer, has_3d=True, has_gt=True)
+            elif args.train_mix and "monocular" in args.tasks:
                 train_epoch_mix_single_dataset_per_batch(args, model_pos, train_loader_3d_h36m, train_loader_3d, losses,
                                                          optimizer, has_3d=True, has_gt=True)
             elapsed = (time() - start_time) / 60
@@ -714,12 +699,12 @@ def train_with_config(args, opts):
             chk_path_latest = os.path.join(opts.checkpoint, 'latest_epoch.bin')
             chk_path_best = os.path.join(opts.checkpoint, 'best_epoch.bin'.format(epoch))
 
-            # save_checkpoint(chk_path_latest, epoch, lr, optimizer, model_pos, min_loss)
+            save_checkpoint(chk_path_latest, epoch, lr, optimizer, model_pos, min_loss)
             if (epoch + 1) % args.checkpoint_frequency == 0:
                 save_checkpoint(chk_path, epoch, lr, optimizer, model_pos, min_loss)
             if e1 < min_loss:
                 min_loss = e1
-                # save_checkpoint(chk_path_best, epoch, lr, optimizer, model_pos, min_loss)
+                save_checkpoint(chk_path_best, epoch, lr, optimizer, model_pos, min_loss)
             if e2 < min_loss_e2:
                 min_loss_e2 = e2
             print(

@@ -8,13 +8,13 @@ model_saved_name: null
 # Traning 
 epochs: 120
 checkpoint_frequency: 60
-batch_size: 8
+batch_size: 12
 dropout: 0.0
 learning_rate: 0.0002 #org 0.0002
 weight_decay: 0.01
 lr_decay: 0.99 # org 0.99
-tasks: ["binocular_spatial", "monocular"]
-train_mix: True
+tasks: ["binocular_spatial"]
+train_mix: False # check this for binocular with monocular
 test_task: binocular_spatial
 mo_bi_ratio: 3
 
@@ -27,16 +27,16 @@ dim_rep: 512
 num_heads: 8
 att_fuse: True
 backbone: Unified_Binocular
-use_decoder: False
+use_decoder: Ture
 decoder_dim_feat: 128
 encoder_left_right_fuse: False
-multi_task_head: True
-shared_interpreter: False # note the tasks
+multi_task_head: False # check this for decoder usage
+shared_interpreter: True # note the tasks
 
 # Data
 data_root: "../dataset/binocular_data/sports/binocular_f243s81"
-subset_list: [binocular_align_all]
-dt_file: "binocular_data/sports/coco_17_binocular_align_all.pkl"
+subset_list: [binocular_align_all_3.7_fix]
+dt_file: "binocular_data/sports/coco_17_binocular_align_all_3.7_fix.pkl"
 
 data_root_h36m: "/mnt/weijiangning-pose-estimation-data/human3.6m"
 subset_list_h36m: [H36M-SH]
@@ -69,5 +69,5 @@ mask_T_ratio: 0.
 noise: False
 
 # Training
-device_ids: [2,3]
+device_ids: [0,1,2,3,4,5]
 #device_ids: [2,3,4,5]
