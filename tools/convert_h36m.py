@@ -27,7 +27,7 @@ def save_clips(subset_name, root_path, train_data, train_labels):
 
 
 datareader = DataReaderH36M(n_frames=243, sample_stride=1, data_stride_train=81, data_stride_test=243,
-                            dt_file='data_mini_same_sub.pkl', dt_root='../../dataset/human3.6m')
+                            dt_file='h36m_sh_conf_cam_source_final.pkl', dt_root='/mnt/weijiangning-pose-estimation-data/human3.6m')
 train_data, test_data, train_labels, test_labels = datareader.get_sliced_data()
 print(train_data.shape, test_data.shape)
 assert len(train_data) == len(train_labels)
@@ -36,6 +36,7 @@ assert len(test_data) == len(test_labels)
 root_path = "../data/motion3d/MB3D_f243s81/H36M-SH"
 root_path = "../data/motion3d/MB3D_f243s81/pingpong"
 root_path = "../../dataset/human3.6m/MB3D_f243s81/mini_same_sub"
+root_path = "/mnt/weijiangning-pose-estimation-data/human3.6m/H36M-SH"
 if not os.path.exists(root_path):
     os.makedirs(root_path)
 

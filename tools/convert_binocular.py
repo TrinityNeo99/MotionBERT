@@ -30,7 +30,7 @@ def save_clips(subset_name, root_path, data_lefts, data_rights, data_labels):
 
 
 datareader = DataReaderBinocular(n_frames=243, sample_stride=1, data_stride_train=81, data_stride_test=243,
-                                 dt_file="coco_17_binocular_align_all.pkl",
+                                 dt_file="coco_17_binocular_align_all_3.7_fix.pkl",
                                  dt_root='../../dataset/binocular_data/sports')
                                  # dt_root="/mnt/weijiangning-pose-estimation-data/dual_camera_data")
 
@@ -52,7 +52,7 @@ root_path = "../../dataset/binocular_data/pingpong_v1/binocular_pingpong_f243s81
 # root_path = "../../dataset/binocular_data/sports/binocular_f243s81/binocular"
 root_path = "/mnt/weijiangning-pose-estimation-data/dual_camera_data/sports/binocular_f243s81/binocular"
 # root_path = "/root/wjn/home/2024-human-pose-estimation-tutorial/MotionBERT/data/motion3d"
-root_path = "../../dataset/binocular_data/sports/binocular_f243s81/binocular_align_all"
+root_path = "../../dataset/binocular_data/sports/binocular_f243s81/binocular_align_all_3.7_fix"
 if not os.path.exists(root_path):
     os.makedirs(root_path)
 
