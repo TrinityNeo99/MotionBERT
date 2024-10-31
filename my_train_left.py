@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 
 from lib.utils.tools import *
 from lib.utils.learning import *
-from lib.utils.utils_data import flip_data
+from lib.utils.utils_data import flip_data_coco as flip_data
 from lib.data.dataset_motion_2d import PoseTrackDataset2D, InstaVDataset2D
 from lib.data.dataset_motion_3d_binocular import MotionDataset3D
 from lib.data.augmentation import Augmenter2D
@@ -27,6 +27,7 @@ from lib.data.datareader_h36m import DataReaderH36M
 from lib.data.datareader_binocular_pingpong import DataReaderBinocular
 from lib.model.loss import *
 import wandb
+import shutil
 
 
 def parse_args():
@@ -81,7 +82,8 @@ def evaluate(args, model_pos, test_loader, datareader):
             else:
                 raise Exception("No Implementation")
             N, T = batch_gt.shape[:2]
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and torch.cuda.get_device_name(
+                    args.device_ids[0]) != "NVIDIA GeForce RTX 3090":
                 batch_input = batch_input.cuda()
             if args.no_conf:
                 batch_input = batch_input[:, :, :, :2]
@@ -238,7 +240,13 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
 
 def train_with_config(args, opts):
     print(args)
+    for d in args.device_ids:
+        print(torch.cuda.get_device_name(d))
     try:
+        if os.path.exists(opts.checkpoint) and not opts.evaluate:
+            decision = input("There already exist a latest_epoch, delete? [y/n]")
+            if decision == "y":
+                shutil.rmtree(opts.checkpoint)
         os.makedirs(opts.checkpoint)
     except OSError as e:
         if e.errno != errno.EEXIST:
@@ -416,12 +424,12 @@ def train_with_config(args, opts):
             chk_path_latest = os.path.join(opts.checkpoint, 'latest_epoch.bin')
             chk_path_best = os.path.join(opts.checkpoint, 'best_epoch.bin'.format(epoch))
 
-            # save_checkpoint(chk_path_latest, epoch, lr, optimizer, model_pos, min_loss)
+            save_checkpoint(chk_path_latest, epoch, lr, optimizer, model_pos, min_loss)
             if (epoch + 1) % args.checkpoint_frequency == 0:
                 save_checkpoint(chk_path, epoch, lr, optimizer, model_pos, min_loss)
             if e1 < min_loss:
                 min_loss = e1
-                # save_checkpoint(chk_path_best, epoch, lr, optimizer, model_pos, min_loss)
+                save_checkpoint(chk_path_best, epoch, lr, optimizer, model_pos, min_loss)
                 min_e1 = e1
                 min_e2 = e2
             print(f"The best results (minimal error) P1: {min_e1 * 1000} mm, P2: {min_e2 * 1000} mm")

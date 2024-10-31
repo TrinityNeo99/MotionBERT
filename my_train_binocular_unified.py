@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 
 from lib.utils.tools import *
 from lib.utils.learning import *
-from lib.utils.utils_data import flip_data
+from lib.utils.utils_data import flip_data_coco as flip_data
 from lib.data.dataset_motion_2d import PoseTrackDataset2D, InstaVDataset2D
 # from lib.data.dataset_motion_3d_binocular_depth import MotionDataset3D  # dataloader depth
 from lib.data.dataset_motion_3d_binocular import MotionDataset3D  # dataloader
@@ -81,7 +81,8 @@ def evaluate(args, model_pos, test_loader, datareader):
     with torch.no_grad():
         for batch_input, batch_input_right, batch_gt in tqdm(test_loader):
             N, T = batch_gt.shape[:2]
-            if torch.cuda.is_available() and torch.cuda.get_device_name(args.device_ids[0]) != "NVIDIA GeForce RTX 3090":
+            if torch.cuda.is_available() and torch.cuda.get_device_name(
+                    args.device_ids[0]) != "NVIDIA GeForce RTX 3090":
                 batch_input = batch_input.cuda()
                 batch_input_right = batch_input_right.cuda()
             if args.no_conf:
@@ -487,7 +488,7 @@ def train_with_config(args, opts):
     for d in args.device_ids:
         print(torch.cuda.get_device_name(d))
     try:
-        if os.path.exists(opts.checkpoint):
+        if os.path.exists(opts.checkpoint) and not opts.evaluate:
             decision = input("There already exist a latest_epoch, delete? [y/n]")
             if decision == "y":
                 shutil.rmtree(opts.checkpoint)
@@ -534,7 +535,7 @@ def train_with_config(args, opts):
 
         datareader_h36m = DataReaderH36M(n_frames=temp_args.clip_len, sample_stride=temp_args.sample_stride,
                                          data_stride_train=temp_args.data_stride, data_stride_test=temp_args.clip_len,
-                                         dt_root='/mnt/weijiangning-pose-estimation-data/human3.6m',
+                                         dt_root=args.data_root_h36m,
                                          dt_file=temp_args.dt_file)
 
     if args.train_2d:
@@ -576,7 +577,7 @@ def train_with_config(args, opts):
             model_pos = model_backbone
     else:
         chk_filename = os.path.join(opts.checkpoint, "latest_epoch.bin")
-
+        print(chk_filename)
         if os.path.exists(chk_filename):
             opts.resume = chk_filename
         if opts.resume or opts.evaluate:
@@ -724,7 +725,11 @@ def train_with_config(args, opts):
                 wandb.log({"H36m Best Error P2": min_loss_e2_h36m, "epoch": epoch + 1})
 
     if opts.evaluate:
-        e1, e2, results_all = evaluate(args, model_pos, test_loader, datareader)
+        e1, e2, results_all = evaluate(args, model_pos, test_loader_3d, datareader)
+        print(f"Sports Binocular ==> The best results (minimal error) P1: {e1 * 1000} mm, P2: {e2 * 1000} mm")
+        if "monocular" in args.tasks:
+            e1_h36m, e2_h36m, results_all = evaluateH36m(args, model_pos, test_loader_3d_h36m, datareader_h36m)
+            print(f"Human 3.6M ==> The best results (minimal error) P1: {e1_h36m} mm, P2: {e2_h36m} mm")
 
 
 def wandb_init(args):

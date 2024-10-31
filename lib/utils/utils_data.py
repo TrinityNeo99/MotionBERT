@@ -68,6 +68,25 @@ def flip_data(data):
     flipped_data[..., left_joints + right_joints, :] = flipped_data[..., right_joints + left_joints, :]
     return flipped_data
 
+def flip_data_coco(data): # coco
+    """
+    horizontal flip
+        data: [N, F, 17, D] or [F, 17, D]. X (horizontal coordinate) is the first channel in D.
+    Return
+        result: same
+    """
+    ## coco format
+    # left_joints = [11, 13, 15, 5, 7, 9]
+    # right_joints = [12, 14, 16, 6, 8, 10]
+    ## human 3.6m format
+    left_joints = [4, 5, 6, 11, 12, 13]
+    right_joints = [1, 2, 3, 14, 15, 16]
+
+    flipped_data = copy.deepcopy(data)
+    flipped_data[..., 0] *= -1  # flip x of all joints
+    flipped_data[..., left_joints + right_joints, :] = flipped_data[..., right_joints + left_joints, :]
+    return flipped_data
+
 
 def resample(ori_len, target_len, replay=False, randomness=True):
     if replay:

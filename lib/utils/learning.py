@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from functools import partial
 from lib.model.DSTformer import DSTformer
+from lib.model.DSTformer_temporal import DSTformer_temporal
 from lib.model.DSTformer_binocular import DSTformer_binocular
 from lib.model.DSTformer_binocular_depth import DSTformer_binocular_depth
 from lib.model.DSTformer_binocular_attention_diff import DSTformer_binocular_attention_diff
@@ -94,6 +95,12 @@ def load_backbone(args):
                                    depth=args.depth, num_heads=args.num_heads, mlp_ratio=args.mlp_ratio,
                                    norm_layer=partial(nn.LayerNorm, eps=1e-6),
                                    maxlen=args.maxlen, num_joints=args.num_joints)
+    elif args.backbone == "DSTformer_temporal":
+        model_backbone = DSTformer_temporal(dim_in=3, dim_out=3, dim_feat=args.dim_feat, dim_rep=args.dim_rep,
+                                   depth=args.depth, num_heads=args.num_heads, mlp_ratio=args.mlp_ratio,
+                                   norm_layer=partial(nn.LayerNorm, eps=1e-6),
+                                   maxlen=args.maxlen, num_joints=args.num_joints)
+        print("DSTformer_temporal model loaded!")
     elif args.backbone == 'DSTformer_binocular':
         model_backbone = DSTformer_binocular(dim_in=3, dim_out=3, dim_feat=args.dim_feat, dim_rep=args.dim_rep,
                                              depth=args.depth, num_heads=args.num_heads, mlp_ratio=args.mlp_ratio,

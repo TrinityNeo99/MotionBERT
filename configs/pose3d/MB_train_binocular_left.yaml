@@ -23,12 +23,12 @@ depth: 5
 dim_rep: 512
 num_heads: 8
 att_fuse: True
-backbone: DSTformer
+backbone: DSTformer_temporal
 
 # Data
 data_root: "../dataset/binocular_data/sports/binocular_f243s81"
-subset_list: [binocular_align_all]
-dt_file: "binocular_data/sports/coco_17_binocular_align_all.pkl"
+subset_list: [binocular_align]
+dt_file: "binocular_data/sports/coco_17_binocular_align.pkl"
 clip_len: 243
 data_stride: 81
 rootrel: True
