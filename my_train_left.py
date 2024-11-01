@@ -28,6 +28,8 @@ from lib.data.datareader_binocular_pingpong import DataReaderBinocular
 from lib.model.loss import *
 import wandb
 import shutil
+from fvcore.nn import FlopCountAnalysis, parameter_count
+from torchinfo import summary
 
 
 def parse_args():
@@ -293,6 +295,33 @@ def train_with_config(args, opts):
     for parameter in model_backbone.parameters():
         model_params = model_params + parameter.numel()
     print('INFO: Trainable parameter count:', model_params)
+    # 计算 FLOPs
+    dummy_input = torch.randn(1, 243, 17, 3)  # B, F, J, C
+    flops = FlopCountAnalysis(model_backbone, dummy_input)
+    print(f"Total FLOPs: {flops.total() / 1e9:.2f} GFLOPs")  # 转换为百万级
+    wandb.log({"FLOPs (G)": round(flops.total() / 1e9, 2)})
+    # print(flops.by_module())  # 显示每层的 FLOPs
+
+
+    output_file = "model_flops.txt"
+    with open(os.path.join(opts.checkpoint, output_file), "w") as f:
+        # 写入模型的总 FLOPs
+        f.write(f"Total FLOPs: {flops.total() / 1e9:.2f} GFLOPs\n\n")
+
+        # 逐一写入每层的 FLOPs
+        flops_by_module = flops.by_module()
+        for layer, flop_count in flops_by_module.items():
+            f.write(f"Layer: {layer}, FLOPs: {flop_count / 1e9:.2f} GFLOPs\n")
+
+    print(f"FLOPs details have been saved to {output_file}")
+
+    # 计算参数量
+    params = parameter_count(model_backbone)
+    print(f"Total parameters: {params[''] / 1e6:.2f} M")  # 转换为百万级
+    wandb.log({"Params (M)": round(params[''] / 1e6, 2)})
+
+    # summary(model_backbone, input_size=(1, 243, 17, 3))
+
 
     if torch.cuda.is_available():
         model_backbone = nn.DataParallel(model_backbone, args.device_ids)

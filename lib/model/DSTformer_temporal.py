@@ -232,7 +232,7 @@ class Block(nn.Module):
         # self.attn_t = Attention(
         #     dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
         #     st_mode="temporal")
-        self.temporal_trans = MoE_Trans(dim, dim, num_frames=243, temporal_heads=4)
+        self.temporal_trans = MoE_Trans(dim, dim, num_frames=243, temporal_heads=8)
 
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()

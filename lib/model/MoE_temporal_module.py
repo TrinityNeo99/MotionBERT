@@ -40,32 +40,6 @@ def bn_init(bn, scale):
     nn.init.constant_(bn.bias, 0)
 
 
-# Transformer 原始位置编码
-class SinPositionEncoding(nn.Module):
-    def __init__(self, max_sequence_length, d_model, base=10000):
-        super().__init__()
-        self.max_sequence_length = max_sequence_length
-        self.d_model = d_model
-        self.base = base
-
-    def forward(self):
-        pe = torch.zeros(self.max_sequence_length, self.d_model,
-                         dtype=torch.float)  # size(max_sequence_length, d_model)
-        exp_1 = torch.arange(self.d_model // 2, dtype=torch.float)  # 初始化一半维度，sin位置编码的维度被分为了两部分
-        exp_value = exp_1 / (self.d_model / 2)
-
-        alpha = 1 / (self.base ** exp_value)  # size(dmodel/2)
-        out = torch.arange(self.max_sequence_length, dtype=torch.float)[:, None] @ alpha[None,
-                                                                                   :]  # size(max_sequence_length, d_model/2)
-        embedding_sin = torch.sin(out)
-        embedding_cos = torch.cos(out)
-
-        pe[:, 0::2] = embedding_sin  # 奇数位置设置为sin
-        pe[:, 1::2] = embedding_cos  # 偶数位置设置为cos
-        pe = pe.unsqueeze(0)
-        return torch.tensor(pe).cuda()
-
-
 def temporal_window_partition(x, window_size):
     """
     Args:
@@ -290,7 +264,7 @@ class TemporalWindowTransformerLayer(nn.Module):
                 x = checkpoint.checkpoint(blk, x)
             else:
                 x, att = blk(x)
-                self.window_attentions.append(att.cpu())
+                # self.window_attentions.append(att.cpu()) # save attention
         if self.downsample is not None:
             x = self.downsample(x)
         return x
@@ -327,12 +301,12 @@ class Temporal_unit(nn.Module):
             # drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
             norm_layer=norm_layer,
             downsample=TemporalWindowPatchMerging if temporal_merge else None,
-            use_checkpoint=use_checkpoint
+            use_checkpoint=use_checkpoint,
+            mlp_ratio=mlp_ratio
         )
 
         self.norm = norm_layer(out_channels)
         self.apply(self._init_weights)
-        # self.linear = nn.Linear(in_channels, out_channels) # 使用temporal_merge以后不需要使用线性层进行升维
         self.pos_drop = nn.Dropout(p=drop_rate)
 
     def _init_weights(self, m):
@@ -352,12 +326,11 @@ class Temporal_unit(nn.Module):
 
         x = self.trans(x)
 
-        x = self.norm(x)  # B L C
+        # x = self.norm(x)  # B L C
         return x
 
     def forward(self, x):
         x = self.forward_features(x)
-        # x = self.linear(x)
         return x
 
 
@@ -392,19 +365,20 @@ class TemporalWindowPatchMerging(nn.Module):
 
 class MoE_temporal_module(nn.Module):
     def __init__(self, in_channels, out_channels, temporal_heads=4, residual=True,
-                 dropout=0.1, temporal_merge=False, expert_windows_size=[9, 27], num_frames=256, temporal_depth=2,
-                 expert_weights=[0.5, 0.5], isLearnable=True, channelDivide=False,
+                 dropout=0.1, temporal_merge=False, expert_windows_size=[81], num_frames=256, temporal_depth=1,
+                 expert_weights=[0.5, 0.5], isLearnable=False, channelDivide=False,
                  temporal_ape=False, use_zloss=0, topK=-1):
         super().__init__()
         self.channelDivide = channelDivide
         self.expert_weights_learnable = isLearnable
         if len(expert_windows_size) == 1:
             expert_weights = [1.0]
-        # assert len(expert_weights) == len(
-        #     expert_windows_size), "the numbers of expert weights and their windows size are not equal"
         if not isLearnable:
+            assert len(expert_weights) == len(
+                expert_windows_size), "the numbers of expert weights and their windows size are not equal"
             expert_weights = torch.tensor(expert_weights)
             self.register_buffer("expert_weights", expert_weights)
+
         self.num_experts = len(expert_windows_size)
         self.temporal_merge = temporal_merge
         self.expert_linear = nn.Linear(in_channels, self.num_experts)
@@ -418,7 +392,7 @@ class MoE_temporal_module(nn.Module):
                               heads=temporal_heads,
                               temporal_merge=temporal_merge, window_size=expert_windows_size[i],
                               num_frames=num_frames,
-                              ape=temporal_ape, depth=temporal_depth))
+                              ape=temporal_ape, depth=temporal_depth, mlp_ratio=2))
 
         # TODO ape
         self.relu = nn.ReLU()
@@ -444,42 +418,23 @@ class MoE_temporal_module(nn.Module):
             expert_weights = self.expert_softmax(logit)
             self.expert_attention = expert_weights
         else:
-            expert_weights = self.expert_weights
+            expert_weights = self.expert_weights.unsqueeze(-1).unsqueeze(-1)
+
+
         if self.channelDivide:
             atx = self.T_multi_expert_channels(tx, B, C, T, V, expert_weights)
-        elif self.expert_weights_learnable:
-            atx = self.T_multi_expert_learn(tx, B, C, T, V, expert_weights)
-        elif self.expert_weights_learnable == False:
-            atx = self.T_multi_expert(tx, B, C, T, V, expert_weights)
+        else:
+            atx = self.T_multi_expert_learn(tx, expert_weights)
+
         stx = rearrange(atx, "(b v) t c -> b c t v", v=V)
-        stx = self.bn2(stx)
-        stx = self.drop(stx)
+        # stx = self.bn2(stx)
+        # stx = self.drop(stx)
         rx = self.residual(tx)
         rx = rearrange(rx, "(b v) t c -> b c t v", v=V)
         stx = stx + rx
-        return self.relu(stx)
+        return stx
 
-    def T_multi_expert_learn(self, x, B, C, T, V, expert_weights):
-        # if self.temporal_merge:
-        #     atx = torch.zeros((B, T // 2, C * 2), device=x.device)
-        # else:
-        #     atx = torch.zeros_like(x)
-        #
-        # for i in range(self.num_experts):
-        #     expert_output = self.experts[i](x)
-        #     if self.temporal_merge:
-        #         expert_weights_i = ((expert_weights[:, 0::2, i] + expert_weights[0, 1::2, i]) / 2).unsqueeze(-1)
-        #         atx += torch.mul(expert_output, expert_weights_i)
-        #     elif self.topK == -1:
-        #         atx += torch.mul(expert_output, expert_weights[:, :, i].unsqueeze(-1))
-        #     elif self.topK != -1:
-        #         expert_weights_onehot_index = torch.argmax(expert_weights, dim=-1)
-        #         expert_weights_onehot = torch.zeros_like(expert_weights)
-        #         expert_weights_onehot[expert_weights_onehot_index] = 1
-        #         atx += torch.mul(expert_output, expert_weights_onehot[:, :, i].unsqueeze(-1))
-
-        # x (B, T, C)
-        # expert_weights = (B, T, num_of_experts)
+    def T_multi_expert_learn(self, x, expert_weights):
         if self.temporal_merge:
             expert_weights = (expert_weights[:, 0::2, :] + expert_weights[:, 0::2, :]) / 2
 
@@ -487,17 +442,6 @@ class MoE_temporal_module(nn.Module):
         expert_outs = torch.stack(expert_outs, dim=0)
         expert_weights = expert_weights.permute(2, 0, 1).unsqueeze(-1)
         atx = torch.sum(torch.mul(expert_outs, expert_weights), dim=0)
-        return atx
-
-    def T_multi_expert(self, x, B, C, T, V, expert_weights):
-        # x : B T C
-        if self.temporal_merge:
-            atx = torch.zeros(B * V, T // 2, C * 2)
-        else:
-            atx = torch.zeros(B * V, T, C)  # get experts' embedding dimension
-        atx = atx.cuda(x.device)
-        for i in range(self.num_experts):
-            atx = expert_weights[i] * self.experts[i](x)
         return atx
 
     def T_multi_expert_channels(self, x, B, C, T, V, expert_weights):
