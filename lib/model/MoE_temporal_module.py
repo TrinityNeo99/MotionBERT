@@ -365,7 +365,7 @@ class TemporalWindowPatchMerging(nn.Module):
 
 class MoE_temporal_module(nn.Module):
     def __init__(self, in_channels, out_channels, temporal_heads=4, residual=True,
-                 dropout=0.1, temporal_merge=False, expert_windows_size=[81], num_frames=256, temporal_depth=1,
+                 dropout=0.1, temporal_merge=False, expert_windows_size=[243], num_frames=243, temporal_depth=1,
                  expert_weights=[0.5, 0.5], isLearnable=False, channelDivide=False,
                  temporal_ape=False, use_zloss=0, topK=-1):
         super().__init__()
@@ -419,7 +419,6 @@ class MoE_temporal_module(nn.Module):
             self.expert_attention = expert_weights
         else:
             expert_weights = self.expert_weights.unsqueeze(-1).unsqueeze(-1)
-
 
         if self.channelDivide:
             atx = self.T_multi_expert_channels(tx, B, C, T, V, expert_weights)
