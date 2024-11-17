@@ -9,6 +9,7 @@ from functools import partial
 from itertools import repeat
 from lib.model.drop import DropPath
 from einops import rearrange, repeat
+from lib.graph.pingpong_coco_bi import AdjMatrixGraph as Graph
 
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
@@ -88,7 +89,8 @@ class MLP(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., st_mode='vanilla'):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., st_mode='vanilla',
+                 isSpatialGraph=False, hop=1, isSpatialAttentionMoE=True, MoE_type="hop1234"):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -108,9 +110,55 @@ class Attention(nn.Module):
         self.attn_count_s = None
         self.attn_count_t = None
 
+        if isSpatialGraph:
+            self.isSpatialGraph = isSpatialGraph
+            graph = Graph()
+            if hop == 1:
+                graph_adjacency_matrix = torch.from_numpy(graph.A_binary)
+            elif hop == 2:
+                graph_adjacency_matrix = torch.from_numpy(graph.A_binary_with_I_2)
+            elif hop == 3:
+                graph_adjacency_matrix = torch.from_numpy(graph.A_binary_with_I_3)
+            elif hop == 5:
+                graph_adjacency_matrix = torch.from_numpy(graph.A_binary_with_I_5)
+            elif hop == 6:
+                graph_adjacency_matrix = torch.from_numpy(graph.A_binary_with_I_6)
+            elif hop == "none":
+                graph_adjacency_matrix = torch.ones((17, 17))
+            else:
+                raise Exception("Not Implementation")
+            attention_mask = torch.where(graph_adjacency_matrix == 0, torch.tensor(-100000), torch.tensor(0.0))
+            self.register_buffer('attention_mask', attention_mask)
+
+        if isSpatialAttentionMoE:
+            graph = Graph()
+            if MoE_type == "hop123":
+                self.num_experts = 3
+                graph_adjacency_matrixs = []
+                graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I))
+                graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I_2))
+                graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I_3))
+                attention_masks = [torch.where(matrix == 0, torch.tensor(-100000), torch.tensor(0.0)) for matrix in graph_adjacency_matrixs]
+                attention_masks = torch.stack(attention_masks, dim=0)
+            elif MoE_type == "hop1234":
+                self.num_experts = 4
+                graph_adjacency_matrixs = []
+                graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I))
+                graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I_2))
+                graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I_3))
+                graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I_4))
+                attention_masks = [torch.where(matrix == 0, torch.tensor(-100000), torch.tensor(0.0)) for matrix in
+                                   graph_adjacency_matrixs]
+                attention_masks = torch.stack(attention_masks, dim=0)
+            else:
+                raise Exception("Not Implementation")
+            self.register_buffer('attention_masks', attention_masks)
+            self.expert_linear = nn.Linear(dim, self.num_experts)
+            self.expert_softmax = nn.Softmax(dim=-1)
+
+
     def forward(self, x, seqlen=1):
         B, N, C = x.shape
-
         if self.mode == 'series':
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
@@ -145,6 +193,10 @@ class Attention(nn.Module):
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
             x = self.forward_spatial(q, k, v)
+        elif self.mode == 'spatial_moe':
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+            x = self.forward_spatial_moe(x, q, k, v)
         else:
             raise NotImplementedError(self.mode)
         x = self.proj(x)
@@ -180,11 +232,33 @@ class Attention(nn.Module):
     def forward_spatial(self, q, k, v):
         B, _, N, C = q.shape
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        if self.isSpatialGraph:
+            attn = attn + self.attention_mask
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
         x = attn @ v
         x = x.transpose(1, 2).reshape(B, N, C * self.num_heads)
+        return x
+
+    def _forward_spatial_mask(self, q, k, v, attention_mask):
+        B, _, N, C = q.shape
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn + attention_mask
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = attn @ v
+        x = x.transpose(1, 2).reshape(B, N, C * self.num_heads)
+        return x
+
+    def forward_spatial_moe(self, x, q, k, v):
+        expert_outs = [self._forward_spatial_mask(q, k, v, self.attention_masks[i]) for i in range(self.num_experts)]
+        expert_outs = torch.stack(expert_outs, dim=0)
+        logit = self.expert_linear(x)
+        expert_weights = self.expert_softmax(logit)
+        expert_weights = expert_weights.permute(2, 0, 1).unsqueeze(-1)
+        x = torch.sum(torch.mul(expert_outs, expert_weights), dim=0)
         return x
 
     def forward_temporal(self, q, k, v, seqlen=8):
@@ -226,7 +300,7 @@ class Block(nn.Module):
         self.norm1_t = norm_layer(dim)
         self.attn_s = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
-            st_mode="spatial")
+            st_mode="spatial_moe")
         self.attn_t = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
             st_mode="temporal")

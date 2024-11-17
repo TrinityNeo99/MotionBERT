@@ -33,6 +33,7 @@ from lib.model.loss import *
 from train import evaluate as evaluateH36m
 import wandb
 import shutil
+from fvcore.nn import FlopCountAnalysis, parameter_count
 
 
 def parse_args():
@@ -82,7 +83,7 @@ def evaluate(args, model_pos, test_loader, datareader):
         for batch_input, batch_input_right, batch_gt in tqdm(test_loader):
             N, T = batch_gt.shape[:2]
             if torch.cuda.is_available() and torch.cuda.get_device_name(
-                    args.device_ids[0]) != "NVIDIA GeForce RTX 3090":
+                    args.device_ids[0]) != "NVIDIA GeForce RTX 3090":  # TODO strange problem of RTX 3090
                 batch_input = batch_input.cuda()
                 batch_input_right = batch_input_right.cuda()
             if args.no_conf:
@@ -139,22 +140,13 @@ def evaluate(args, model_pos, test_loader, datareader):
                 predicted_3d_pos[..., :2] = batch_input[..., :2]
             results_all.append(predicted_3d_pos.cpu().numpy())
     results_all = np.concatenate(results_all)
-    # results_all = datareader.denormalize(results_all)
     _, split_id_test = datareader.get_split_id()
     actions = np.array(datareader.dt_dataset['test']['action'])
-    # factors = np.array(datareader.dt_dataset['test']['2.5d_factor'])
     gts = np.array(datareader.dt_dataset['test']['joint3d_image'])
-    # sources = np.array(datareader.dt_dataset['test']['source'])
-
     num_test_frames = len(actions)
     frames = np.array(range(num_test_frames))
-    # action_clips = actions[split_id_test]
     action_clips = get_sliced_data_sub(actions, split_id_test)
-    # factor_clips = factors[split_id_test]
-    # source_clips = sources[split_id_test]
-    # frame_clips = frames[split_id_test]
     frame_clips = get_sliced_data_sub(frames, split_id_test)
-    # gt_clips = gts[split_id_test]
     gt_clips = get_sliced_data_sub(gts, split_id_test)
     assert len(results_all) == len(action_clips)
 
@@ -174,7 +166,6 @@ def evaluate(args, model_pos, test_loader, datareader):
         # factor = factor_clips[idx][:, None, None]
         gt = gt_clips[idx]
         pred = results_all[idx]
-        # pred *= factor
 
         # Root-relative Errors
         pred = pred - pred[:, 0:1, :]
@@ -489,7 +480,7 @@ def train_with_config(args, opts):
         print(torch.cuda.get_device_name(d))
     try:
         if os.path.exists(opts.checkpoint) and not opts.evaluate:
-            decision = input("There already exist a latest_epoch, delete? [y/n]")
+            decision = input("There already exist a checkpoint directory, delete? [y/n]")
             if decision == "y":
                 shutil.rmtree(opts.checkpoint)
         os.makedirs(opts.checkpoint)
@@ -557,6 +548,34 @@ def train_with_config(args, opts):
     for parameter in model_backbone.parameters():
         model_params = model_params + parameter.numel()
     print('INFO: Trainable parameter count:', model_params)
+
+    # 计算 FLOPs
+    if args.test_task == "binocular_spatial":
+        dummy_input = torch.randn(1, 243, 34, 3)  # B, F, J, C
+        flops = FlopCountAnalysis(model_backbone, (dummy_input, "binocular_spatial"))
+    else:
+        dummy_input = torch.randn(1, 243, 17, 3)  # B, F, J, C
+        flops = FlopCountAnalysis(model_backbone, dummy_input)
+    print(f"Total FLOPs: {flops.total() / 1e9:.2f} GFLOPs")  # 转换为百万级
+    wandb.log({"FLOPs (G)": round(flops.total() / 1e9, 2)})
+    # print(flops.by_module())  # 显示每层的 FLOPs
+
+    output_file = "model_flops.txt"
+    with open(os.path.join(opts.checkpoint, output_file), "w") as f:
+        # 写入模型的总 FLOPs
+        f.write(f"Total FLOPs: {flops.total() / 1e9:.2f} GFLOPs\n\n")
+
+        # 逐一写入每层的 FLOPs
+        flops_by_module = flops.by_module()
+        for layer, flop_count in flops_by_module.items():
+            f.write(f"Layer: {layer}, FLOPs: {flop_count / 1e9:.2f} GFLOPs\n")
+
+    print(f"FLOPs details have been saved to {output_file}")
+
+    # 计算参数量
+    params = parameter_count(model_backbone)
+    print(f"Total parameters: {params[''] / 1e6:.2f} M")  # 转换为百万级
+    wandb.log({"Params (M)": round(params[''] / 1e6, 2)})
 
     if torch.cuda.is_available():
         model_backbone = nn.DataParallel(model_backbone, args.device_ids)

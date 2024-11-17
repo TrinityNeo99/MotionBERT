@@ -180,6 +180,7 @@ def evaluate(args, model_pos, test_loader, datareader):
 
 def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt):
     model_pos.train()
+    device = f"cuda:{args.device_ids[0]}"
     for idx, (batch_input_left, batch_input_right, batch_gt) in tqdm(enumerate(train_loader)):
         if args.direction == "left":
             batch_input = batch_input_left
@@ -187,10 +188,8 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
             batch_input = batch_input_right
         batch_size = len(batch_input)
         if torch.cuda.is_available():
-            # batch_input = batch_input.cuda()
-            batch_input = batch_input.to(f"cuda:{args.device_ids[0]}")
-            # batch_gt = batch_gt.cuda()
-            batch_gt = batch_gt.to(f"cuda:{args.device_ids[0]}")
+            batch_input = batch_input.to(device)
+            batch_gt = batch_gt.to(device)
         with torch.no_grad():
             if args.no_conf:
                 batch_input = batch_input[:, :, :, :2]
@@ -209,7 +208,13 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
 
         optimizer.zero_grad()
         if has_3d:
-            loss_3d_pos = loss_mpjpe(predicted_3d_pos, batch_gt)
+            if not args.use_weighted_mpjpe:
+                loss_3d_pos = loss_mpjpe(predicted_3d_pos, batch_gt)
+            else:
+                # weighted mpjpe loss
+                w = torch.tensor([1, 1, 1, 1, 1, 2.5, 2.5, 4, 4, 4, 4, 1, 1, 2.5, 2.5, 4, 4]).to(device)
+                loss_3d_pos = weighted_mpjpe(predicted_3d_pos, batch_gt, w)
+
             loss_3d_scale = n_mpjpe(predicted_3d_pos, batch_gt)
             loss_3d_velocity = loss_velocity(predicted_3d_pos, batch_gt)
             loss_lv = loss_limb_var(predicted_3d_pos)
@@ -302,7 +307,6 @@ def train_with_config(args, opts):
     wandb.log({"FLOPs (G)": round(flops.total() / 1e9, 2)})
     # print(flops.by_module())  # 显示每层的 FLOPs
 
-
     output_file = "model_flops.txt"
     with open(os.path.join(opts.checkpoint, output_file), "w") as f:
         # 写入模型的总 FLOPs
@@ -321,7 +325,6 @@ def train_with_config(args, opts):
     wandb.log({"Params (M)": round(params[''] / 1e6, 2)})
 
     # summary(model_backbone, input_size=(1, 243, 17, 3))
-
 
     if torch.cuda.is_available():
         model_backbone = nn.DataParallel(model_backbone, args.device_ids)

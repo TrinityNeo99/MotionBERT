@@ -120,6 +120,10 @@ class Attention(nn.Module):
                 graph_adjacency_matrix = torch.from_numpy(graph.A_binary_2)
             elif hop == 3:
                 graph_adjacency_matrix = torch.from_numpy(graph.A_binary_with_I_3)
+            elif hop == 5:
+                graph_adjacency_matrix = torch.from_numpy(graph.A_binary_with_I_5)
+            elif hop == 6:
+                graph_adjacency_matrix = torch.from_numpy(graph.A_binary_with_I_6)
             elif hop == "none":
                 graph_adjacency_matrix = torch.ones((17, 17))
             attention_mask = torch.where(graph_adjacency_matrix == 0, torch.tensor(-100000), torch.tensor(0.0))
@@ -199,10 +203,11 @@ class Attention(nn.Module):
     def forward_spatial(self, q, k, v):
         B, _, N, C = q.shape
         attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
         if self.isSpatialGraph:
             attn = attn + self.attention_mask  # TODO 不确定能否直接相加
+
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
 
         x = attn @ v
         x = x.transpose(1, 2).reshape(B, N, C * self.num_heads)
