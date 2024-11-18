@@ -1,3 +1,5 @@
+import copy
+
 import torch
 import torch.nn as nn
 import math
@@ -90,7 +92,7 @@ class MLP(nn.Module):
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., st_mode='vanilla',
-                 isSpatialGraph=False, hop=1, isSpatialAttentionMoE=True, MoE_type="hop1234"):
+                 isSpatialGraph=False, hop=1, isSpatialAttentionMoE=False, MoE_type="hop1234"):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -110,8 +112,8 @@ class Attention(nn.Module):
         self.attn_count_s = None
         self.attn_count_t = None
 
+        self.isSpatialGraph = isSpatialGraph
         if isSpatialGraph:
-            self.isSpatialGraph = isSpatialGraph
             graph = Graph()
             if hop == 1:
                 graph_adjacency_matrix = torch.from_numpy(graph.A_binary)
@@ -300,7 +302,7 @@ class Block(nn.Module):
         self.norm1_t = norm_layer(dim)
         self.attn_s = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
-            st_mode="spatial_moe")
+            st_mode="spatial")
         self.attn_t = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
             st_mode="temporal")
@@ -600,6 +602,7 @@ class Unified_Binocular(nn.Module):
                     x = (x_left + x_right) * 0.5
 
         x = self.pre_logits(x)  # [B, F, J, dim_feat]
+        logits = x
 
         if self.multi_task_head:
             if type == "left2right":
@@ -624,4 +627,4 @@ class Unified_Binocular(nn.Module):
                 raise Exception("Undefined task type")
         else:
             raise Exception("Undefined head settings")
-        return x
+        return x, logits

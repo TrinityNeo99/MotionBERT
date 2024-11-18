@@ -79,11 +79,19 @@ def evaluate(args, model_pos, test_loader, datareader):
             if args.flip:
                 batch_input_flip = flip_data(batch_input)
                 predicted_3d_pos_1 = model_pos(batch_input)
+                if isinstance(predicted_3d_pos_1, tuple):
+                    predicted_3d_pos_1 = predicted_3d_pos_1[0]
                 predicted_3d_pos_flip = model_pos(batch_input_flip)
+                if isinstance(predicted_3d_pos_flip, tuple):
+                    predicted_3d_pos_flip = predicted_3d_pos_flip[0]
                 predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
+                if isinstance(predicted_3d_pos_2, tuple):
+                    predicted_3d_pos_2 = predicted_3d_pos_2[0]
                 predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
             else:
                 predicted_3d_pos = model_pos(batch_input)
+                if isinstance(predicted_3d_pos, tuple):
+                    predicted_3d_pos = predicted_3d_pos[0]
             if args.rootrel:
                 predicted_3d_pos[:, :, 0, :] = 0  # [N,T,17,3]
             else:

@@ -13,8 +13,8 @@ dropout: 0.0
 learning_rate: 0.0004 #org 0.0002
 weight_decay: 0.01
 lr_decay: 0.99 # org 0.99
-tasks: ["binocular_spatial"]
-train_mix: False # check this for binocular with monocular
+tasks: ["binocular_spatial", "monocular"]
+train_mix: True # check this for binocular with monocular
 test_task: binocular_spatial
 mo_bi_ratio: 3
 
@@ -70,5 +70,5 @@ mask_T_ratio: 0.
 noise: False
 
 # Training
-device_ids: [2,3]
+device_ids: [0,1]
 #device_ids: [2,3,4,5]

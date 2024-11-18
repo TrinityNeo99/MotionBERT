@@ -119,15 +119,15 @@ def evaluate(args, model_pos, test_loader, datareader):
                     batch_input_flip = flip_data(batch_input)
                     batch_input_flip_right = flip_data(batch_input_right)
                     input_merge = torch.cat((batch_input, batch_input_right), dim=2)
-                    predicted_3d_pos_1 = model_pos(input_merge, "binocular_spatial")  # (N, T, 17, 3)
+                    predicted_3d_pos_1, _ = model_pos(input_merge, "binocular_spatial")  # (N, T, 17, 3)
 
                     input_flip = torch.cat((batch_input_flip, batch_input_flip_right), dim=2)
-                    predicted_3d_pos_flip = model_pos(input_flip, "binocular_spatial")  # (N, T, 17, 3)
+                    predicted_3d_pos_flip, _ = model_pos(input_flip, "binocular_spatial")  # (N, T, 17, 3)
                     predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
                     predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
                 else:
                     input_merge = torch.cat((batch_input, batch_input_right), dim=2)
-                    predicted_3d_pos = model_pos(input_merge, "binocular_spatial")  # (N, T, 17, 3)
+                    predicted_3d_pos, _ = model_pos(input_merge, "binocular_spatial")  # (N, T, 17, 3)
             else:
                 raise Exception("Undefined task type")
 
@@ -318,7 +318,7 @@ def train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_in
         batch_input = batch_input.to(device)
         batch_gt = batch_gt.to(device)
     batch_input, _, batch_gt = batch_preprocess(batch_input, None, batch_gt, args, has_3d, has_gt)
-    predicted_3d_pos = model_pos(batch_input, "monocular")
+    predicted_3d_pos, logist = model_pos(batch_input, "monocular")
     optimizer.zero_grad()
     batch_size = len(batch_input)
     if has_3d:
@@ -350,7 +350,7 @@ def train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_in
         loss_total = loss_2d_proj
         losses['2d_proj'].update(loss_2d_proj.item(), batch_size)
         losses['total'].update(loss_total.item(), batch_size)
-    return loss_total
+    return loss_total, logist
 
 
 def train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input, batch_input_right, batch_gt):
@@ -370,7 +370,7 @@ def train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_in
             predicted_3d_pos_ = model_pos(batch_input_right, "monocular")  # (N, T, 17, 3)
         elif task == "binocular_spatial":
             input_merge = torch.cat((batch_input, batch_input_right), dim=2)  # concat along spatial
-            predicted_3d_pos = model_pos(input_merge, task)  # (N, T, 34, 3)
+            predicted_3d_pos, logist = model_pos(input_merge, task)  # (N, T, 34, 3)
         elif task == "left2right":
             predict_2d_right = model_pos(batch_input, task)
         elif task == "right2left":
@@ -435,7 +435,7 @@ def train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_in
         loss_total = loss_2d_proj
         losses['2d_proj'].update(loss_2d_proj.item(), batch_size)
         losses['total'].update(loss_total.item(), batch_size)
-    return loss_total
+    return loss_total, logist
 
 
 def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataloader, binocular_dataloader, losses,
@@ -457,7 +457,15 @@ def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataload
                     # 重新开始第一个数据集迭代
                     monocular_dataloader_iter = iter(monocular_dataloader)
                     batch_input, batch_gt = next(monocular_dataloader_iter)
-                loss_total = train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input, batch_gt)
+                loss_total, monocular_logist = train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt,
+                                                               batch_input, batch_gt)
+                batch_gt_mo = batch_gt
+                if i % (ratio + 1) == ratio - 1:
+                    # loss_total.backward(retain_graph=True)  # for contrast usage
+                    loss_total_mo = loss_total
+                    pass
+                else:
+                    loss_total.backward()
             else:
                 # 使用第二个数据集
                 try:
@@ -466,10 +474,18 @@ def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataload
                     # 重新开始第二个数据集迭代
                     binocular_dataloader_iter = iter(binocular_dataloader)
                     batch_input, batch_input_right, batch_gt = next(binocular_dataloader_iter)
-                loss_total = train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_input,
-                                             batch_input_right, batch_gt)
+                loss_total, binocular_logist = train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt,
+                                                               batch_input,
+                                                               batch_input_right, batch_gt)
+                ## add contrast learning loss
+                embeddings = torch.cat((monocular_logist, binocular_logist), dim=0)
+                # embeddings.detach().requires_grad_()
+                gts = torch.cat((batch_gt_mo, batch_gt), dim=0)
+                contrast_loss = velocity_contrast_loss(embeddings, gts, 0.002)  # 根据数据分布进行划分
+                loss_total_contrast = loss_total + loss_total_mo + 0.1 * contrast_loss
+                losses['contrast'].update(contrast_loss.item(), args.batch_size)
+                loss_total_contrast.backward()
             pbar.update(1)
-            loss_total.backward()
             optimizer.step()
 
 
@@ -654,6 +670,7 @@ def train_with_config(args, opts):
             losses['r2l'] = AverageMeter()
             losses['l2r'] = AverageMeter()
             losses['s2s'] = AverageMeter()
+            losses['contrast'] = AverageMeter()
             N = 0
 
             # Curriculum Learning
@@ -685,6 +702,7 @@ def train_with_config(args, opts):
                 wandb.log({"Error P1": e1 * 1000, "epoch": epoch + 1})
                 wandb.log({"Error P2": e2 * 1000, "epoch": epoch + 1})
                 wandb.log({"loss_3d_pos": losses['3d_pos'].avg, "epoch": epoch + 1})
+                wandb.log({"loss_contrast": losses['contrast'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_2d_project": losses['2d_proj'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_3d_scale": losses['3d_scale'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_3d_velocity": losses['3d_velocity'].avg, "epoch": epoch + 1})
