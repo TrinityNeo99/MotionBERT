@@ -10,13 +10,14 @@ epochs: 120
 checkpoint_frequency: 60
 batch_size: 4
 dropout: 0.0
-learning_rate: 0.0004 #org 0.0002
+learning_rate: 0.0002 #org 0.0002
 weight_decay: 0.01
 lr_decay: 0.99 # org 0.99
-tasks: ["binocular_spatial", "monocular"]
+tasks: ["binocular_left", "monocular"]
 train_mix: True # check this for binocular with monocular
-test_task: binocular_spatial
+test_task: binocular_left
 mo_bi_ratio: 3
+mix_contrast_learning: False
 
 # Model
 maxlen: 243
@@ -61,6 +62,7 @@ lambda_av: 0.0
 lambda_r2l: 0.1
 lambda_l2r: 0.1
 lambda_s2s: 0.1
+lambda_contrast: 0.1
 
 # Augmentation
 synthetic: False
@@ -70,5 +72,5 @@ mask_T_ratio: 0.
 noise: False
 
 # Training
-device_ids: [0,1]
+device_ids: [2,3]
 #device_ids: [2,3,4,5]

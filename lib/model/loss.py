@@ -236,6 +236,8 @@ def info_NCE(pos_group, all_group, tau=0.1):
             for k in range(all_group.shape[0]):
                 sim_p2a += torch.exp(torch.mean(F.cosine_similarity(pos_group[i], all_group[k], dim=-1)) / tau)
             loss += torch.log(sim_p2p / sim_p2a)
+    if cnt == 0:
+        return torch.tensor(0)
     contrast_loss = -1 * loss / cnt
     return contrast_loss
 
@@ -252,7 +254,29 @@ def velocity_contrast_loss(embeddings, gts, threshold):
             pos_group.append(embeddings[i])
     if len(pos_group) == 0:
         return torch.tensor(0)
+
     all_group = pos_group + neg_group
     pos_group = torch.stack(pos_group, dim=0)
     all_group = torch.stack(all_group, dim=0)
     return info_NCE(pos_group, all_group)
+
+def velocity_contrast_loss_dual(embeddings, gts, threshold):
+    B, F, J, C = embeddings.shape
+    assert embeddings.shape[0] == gts.shape[0]
+    pos_group, neg_group = [], []
+    for i in range(B):
+        cur_v = calculate_velocity(gts[i])
+        if cur_v <= threshold:
+            neg_group.append(embeddings[i])
+        else:
+            pos_group.append(embeddings[i])
+    if len(pos_group) == 0:
+        return torch.tensor(0)
+
+    all_group = pos_group + neg_group
+    pos_group = torch.stack(pos_group, dim=0)
+    neg_group = torch.stack(neg_group, dim=0)
+    all_group = torch.stack(all_group, dim=0)
+    fast_loss = info_NCE(pos_group, all_group)
+    slow_loss = info_NCE(neg_group, all_group)
+    return fast_loss, slow_loss

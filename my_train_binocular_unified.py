@@ -128,6 +128,15 @@ def evaluate(args, model_pos, test_loader, datareader):
                 else:
                     input_merge = torch.cat((batch_input, batch_input_right), dim=2)
                     predicted_3d_pos, _ = model_pos(input_merge, "binocular_spatial")  # (N, T, 17, 3)
+            elif args.test_task == "binocular_left":
+                if args.flip:
+                    batch_input_flip = flip_data(batch_input)
+                    predicted_3d_pos_1 = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
+                    predicted_3d_pos_flip = model_pos(batch_input_flip, "monocular")  # (N, T, 17, 3)
+                    predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
+                    predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
+                else:
+                    predicted_3d_pos = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
             else:
                 raise Exception("Undefined task type")
 
@@ -370,7 +379,7 @@ def train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_in
             predicted_3d_pos_ = model_pos(batch_input_right, "monocular")  # (N, T, 17, 3)
         elif task == "binocular_spatial":
             input_merge = torch.cat((batch_input, batch_input_right), dim=2)  # concat along spatial
-            predicted_3d_pos, logist = model_pos(input_merge, task)  # (N, T, 34, 3)
+            predicted_3d_pos, logits = model_pos(input_merge, task)  # (N, T, 34, 3)
         elif task == "left2right":
             predict_2d_right = model_pos(batch_input, task)
         elif task == "right2left":
@@ -381,6 +390,8 @@ def train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_in
             predict_2d_self = model_pos(input, task)
         elif task == "monocular":
             pass  # do nothing
+        elif task == "binocular_left":
+            predicted_3d_pos, logits = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
         else:
             raise Exception("No Implementation")
     optimizer.zero_grad()
@@ -435,7 +446,7 @@ def train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt, batch_in
         loss_total = loss_2d_proj
         losses['2d_proj'].update(loss_2d_proj.item(), batch_size)
         losses['total'].update(loss_total.item(), batch_size)
-    return loss_total, logist
+    return loss_total, logits
 
 
 def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataloader, binocular_dataloader, losses,
@@ -457,13 +468,18 @@ def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataload
                     # 重新开始第一个数据集迭代
                     monocular_dataloader_iter = iter(monocular_dataloader)
                     batch_input, batch_gt = next(monocular_dataloader_iter)
-                loss_total, monocular_logist = train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt,
-                                                               batch_input, batch_gt)
-                batch_gt_mo = batch_gt
-                if i % (ratio + 1) == ratio - 1:
-                    # loss_total.backward(retain_graph=True)  # for contrast usage
-                    loss_total_mo = loss_total
-                    pass
+                loss_total = train_monocular(args, model_pos, losses, optimizer, has_3d, has_gt,
+                                             batch_input, batch_gt)
+                if isinstance(loss_total, tuple):
+                    loss_total, monocular_logits = loss_total[0], loss_total[1]
+
+                if args.mix_contrast_learning:
+                    batch_gt_mo = batch_gt
+                    if i % (ratio + 1) == ratio - 1:
+                        loss_total_mo = loss_total
+                        pass
+                    else:
+                        loss_total.backward()
                 else:
                     loss_total.backward()
             else:
@@ -474,17 +490,21 @@ def train_epoch_mix_single_dataset_per_batch(args, model_pos, monocular_dataload
                     # 重新开始第二个数据集迭代
                     binocular_dataloader_iter = iter(binocular_dataloader)
                     batch_input, batch_input_right, batch_gt = next(binocular_dataloader_iter)
-                loss_total, binocular_logist = train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt,
-                                                               batch_input,
-                                                               batch_input_right, batch_gt)
-                ## add contrast learning loss
-                embeddings = torch.cat((monocular_logist, binocular_logist), dim=0)
-                # embeddings.detach().requires_grad_()
-                gts = torch.cat((batch_gt_mo, batch_gt), dim=0)
-                contrast_loss = velocity_contrast_loss(embeddings, gts, 0.002)  # 根据数据分布进行划分
-                loss_total_contrast = loss_total + loss_total_mo + 0.1 * contrast_loss
-                losses['contrast'].update(contrast_loss.item(), args.batch_size)
-                loss_total_contrast.backward()
+                loss_total = train_binocular(args, model_pos, losses, optimizer, has_3d, has_gt,
+                                             batch_input,
+                                             batch_input_right, batch_gt)
+                if isinstance(loss_total, tuple):
+                    loss_total, binocular_logits = loss_total[0], loss_total[1]
+                if args.mix_contrast_learning:
+                    ## add contrast learning loss
+                    embeddings = torch.cat((monocular_logits, binocular_logits), dim=0)
+                    gts = torch.cat((batch_gt_mo, batch_gt), dim=0)
+                    contrast_loss = velocity_contrast_loss(embeddings, gts, 0.002)  # 根据数据分布进行划分
+                    loss_total_contrast = loss_total + loss_total_mo + args.lambda_contrast * contrast_loss
+                    losses['contrast'].update(contrast_loss.item(), args.batch_size)
+                    loss_total_contrast.backward()
+                else:
+                    loss_total.backward()
             pbar.update(1)
             optimizer.step()
 
