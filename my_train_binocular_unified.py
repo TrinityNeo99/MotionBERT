@@ -131,12 +131,12 @@ def evaluate(args, model_pos, test_loader, datareader):
             elif args.test_task == "binocular_left":
                 if args.flip:
                     batch_input_flip = flip_data(batch_input)
-                    predicted_3d_pos_1 = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
-                    predicted_3d_pos_flip = model_pos(batch_input_flip, "monocular")  # (N, T, 17, 3)
+                    predicted_3d_pos_1, _ = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
+                    predicted_3d_pos_flip, _ = model_pos(batch_input_flip, "monocular")  # (N, T, 17, 3)
                     predicted_3d_pos_2 = flip_data(predicted_3d_pos_flip)  # Flip back
                     predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_2) / 2
                 else:
-                    predicted_3d_pos = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
+                    predicted_3d_pos, _ = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
             else:
                 raise Exception("Undefined task type")
 
@@ -722,7 +722,8 @@ def train_with_config(args, opts):
                 wandb.log({"Error P1": e1 * 1000, "epoch": epoch + 1})
                 wandb.log({"Error P2": e2 * 1000, "epoch": epoch + 1})
                 wandb.log({"loss_3d_pos": losses['3d_pos'].avg, "epoch": epoch + 1})
-                wandb.log({"loss_contrast": losses['contrast'].avg, "epoch": epoch + 1})
+                if args.mix_contrast_learning:
+                    wandb.log({"loss_contrast": losses['contrast'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_2d_project": losses['2d_proj'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_3d_scale": losses['3d_scale'].avg, "epoch": epoch + 1})
                 wandb.log({"loss_3d_velocity": losses['3d_velocity'].avg, "epoch": epoch + 1})

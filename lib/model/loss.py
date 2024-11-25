@@ -242,7 +242,23 @@ def info_NCE(pos_group, all_group, tau=0.1):
     return contrast_loss
 
 
-def velocity_contrast_loss(embeddings, gts, threshold):
+def info_NCE_vanilla(pos_group, neg_group, tau=0.07):
+    cnt = 0
+    loss = 0
+    for i in range(pos_group.shape[0]):
+        for j in range(i + 1, pos_group.shape[0]):
+            cnt += 1
+            sim_p2p = torch.exp(torch.mean(F.cosine_similarity(pos_group[i], pos_group[j], dim=-1)) / tau)
+            sim_p2n = 0
+            for k in range(neg_group.shape[0]):
+                sim_p2n += torch.exp(torch.mean(F.cosine_similarity(pos_group[i], neg_group[k], dim=-1)) / tau)
+            loss += torch.log(sim_p2p / (sim_p2p + sim_p2n))
+    if cnt == 0:
+        return torch.tensor(0)
+    contrast_loss = -1 * loss / cnt
+    return contrast_loss
+
+def velocity_contrast_loss_(embeddings, gts, threshold):
     B, F, J, C = embeddings.shape
     assert embeddings.shape[0] == gts.shape[0]
     pos_group, neg_group = [], []
@@ -260,6 +276,25 @@ def velocity_contrast_loss(embeddings, gts, threshold):
     all_group = torch.stack(all_group, dim=0)
     return info_NCE(pos_group, all_group)
 
+def velocity_contrast_loss(embeddings, gts, threshold):
+    B, F, J, C = embeddings.shape
+    assert embeddings.shape[0] == gts.shape[0]
+    pos_group, neg_group = [], []
+    for i in range(B):
+        cur_v = calculate_velocity(gts[i])
+        if cur_v <= threshold:
+            neg_group.append(embeddings[i])
+        else:
+            pos_group.append(embeddings[i])
+    if len(pos_group) == 0:
+        return torch.tensor(0)
+    if len(neg_group) == 0:
+        return torch.tensor(0)
+
+    pos_group = torch.stack(pos_group, dim=0)
+    neg_group = torch.stack(neg_group, dim=0)
+    return info_NCE_vanilla(pos_group, neg_group)
+
 def velocity_contrast_loss_dual(embeddings, gts, threshold):
     B, F, J, C = embeddings.shape
     assert embeddings.shape[0] == gts.shape[0]
@@ -272,6 +307,8 @@ def velocity_contrast_loss_dual(embeddings, gts, threshold):
             pos_group.append(embeddings[i])
     if len(pos_group) == 0:
         return torch.tensor(0)
+    if len(neg_group) == 0:
+        return torch.tensor(0)
 
     all_group = pos_group + neg_group
     pos_group = torch.stack(pos_group, dim=0)
@@ -279,4 +316,4 @@ def velocity_contrast_loss_dual(embeddings, gts, threshold):
     all_group = torch.stack(all_group, dim=0)
     fast_loss = info_NCE(pos_group, all_group)
     slow_loss = info_NCE(neg_group, all_group)
-    return fast_loss, slow_loss
+    return fast_loss+slow_loss
