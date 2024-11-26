@@ -244,6 +244,12 @@ def train_epoch(args, model_pos, train_loader, losses, optimizer, has_3d, has_gt
                 drop_out = nn.Dropout(p=0.2)
                 input = drop_out(batch_input)
                 predict_2d_self = model_pos(input, task)
+            elif task == "binocular_left":
+                predicted_3d_pos = model_pos(batch_input, "monocular")  # (N, T, 17, 3)
+                if isinstance(predicted_3d_pos, tuple):
+                    predicted_3d_pos, logits = predicted_3d_pos[0], predicted_3d_pos[1]
+            else:
+                raise Exception("Not implementation")
 
         optimizer.zero_grad()
         if has_3d:

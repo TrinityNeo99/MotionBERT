@@ -14,6 +14,18 @@ from einops import rearrange, repeat
 from lib.graph.pingpong_coco_bi import AdjMatrixGraph as Graph
 
 
+def get_temporal_mask(max_len, window_size):
+    assert max_len % window_size == 0, "the length of sequence can not divided by window size"
+
+    # Initialize the matrix with zeros
+    matrix = np.zeros((max_len, max_len))
+
+    # Set the diagonal blocks to 1
+    for i in range(0, max_len, window_size):
+        matrix[i:i + window_size, i:i + window_size] = 1
+    return matrix
+
+
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
     # Cut & paste from PyTorch official master until it's in a few official releases - RW
     # Method based on https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
@@ -92,7 +104,8 @@ class MLP(nn.Module):
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., st_mode='vanilla',
-                 isSpatialGraph=False, hop=1, isSpatialAttentionMoE=False, MoE_type="hop1234"):
+                 isSpatialGraph=False, hop=1, isSpatialAttentionMoE=False, MoE_type="hop1234",
+                 isTemporalAttentionMoE=True, temporal_MoE_type=[9, 27, 81, 243]):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -140,7 +153,8 @@ class Attention(nn.Module):
                 graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I))
                 graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I_2))
                 graph_adjacency_matrixs.append(torch.from_numpy(graph.A_binary_with_I_3))
-                attention_masks = [torch.where(matrix == 0, torch.tensor(-100000), torch.tensor(0.0)) for matrix in graph_adjacency_matrixs]
+                attention_masks = [torch.where(matrix == 0, torch.tensor(-100000), torch.tensor(0.0)) for matrix in
+                                   graph_adjacency_matrixs]
                 attention_masks = torch.stack(attention_masks, dim=0)
             elif MoE_type == "hop1234":
                 self.num_experts = 4
@@ -158,6 +172,15 @@ class Attention(nn.Module):
             self.expert_linear = nn.Linear(dim, self.num_experts)
             self.expert_softmax = nn.Softmax(dim=-1)
 
+        if isTemporalAttentionMoE:
+            self.temporal_num_experts = len(temporal_MoE_type)
+            temporal_matrixs = [torch.from_numpy(get_temporal_mask(243, window)) for window in temporal_MoE_type]
+            temporal_attention_masks = [torch.where(matrix == 0, torch.tensor(-100000), torch.tensor(0.0)) for matrix in
+                                        temporal_matrixs]
+            temporal_attention_masks = torch.stack(temporal_attention_masks, dim=0)
+            self.register_buffer('temporal_attention_masks', temporal_attention_masks)
+            self.temporal_expert_linear = nn.Linear(dim, self.temporal_num_experts)
+            self.temporal_expert_softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, seqlen=1):
         B, N, C = x.shape
@@ -199,6 +222,10 @@ class Attention(nn.Module):
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
             x = self.forward_spatial_moe(x, q, k, v)
+        elif self.mode == 'temporal_moe':
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+            x = self.forward_temporal_moe(x, q, k, v, seqlen=seqlen)
         else:
             raise NotImplementedError(self.mode)
         x = self.proj(x)
@@ -277,6 +304,31 @@ class Attention(nn.Module):
         x = x.permute(0, 3, 2, 1, 4).reshape(B, N, C * self.num_heads)
         return x
 
+    def _forward_temporal_mask(self, q, k, v, attention_mask, seqlen=8):
+        B, _, N, C = q.shape
+        qt = q.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
+        kt = k.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
+        vt = v.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
+
+        attn = (qt @ kt.transpose(-2, -1)) * self.scale
+        attn = attn + attention_mask
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = attn @ vt  # (B, H, N, T, C)
+        x = x.permute(0, 3, 2, 1, 4).reshape(B, N, C * self.num_heads)
+        return x
+
+    def forward_temporal_moe(self, x, q, k, v, seqlen=8):
+        expert_outs = [self._forward_temporal_mask(q, k, v, self.temporal_attention_masks[i], seqlen) for i in
+                       range(self.temporal_num_experts)]
+        expert_outs = torch.stack(expert_outs, dim=0)
+        logit = self.temporal_expert_linear(x)
+        expert_weights = self.temporal_expert_softmax(logit)
+        expert_weights = expert_weights.permute(2, 0, 1).unsqueeze(-1)
+        x = torch.sum(torch.mul(expert_outs, expert_weights), dim=0)
+        return x
+
     def count_attn(self, attn):
         attn = attn.detach().cpu().numpy()
         attn = attn.mean(axis=1)
@@ -305,7 +357,7 @@ class Block(nn.Module):
             st_mode="spatial")
         self.attn_t = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
-            st_mode="temporal")
+            st_mode="temporal_moe")
 
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
