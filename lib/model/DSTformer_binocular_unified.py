@@ -12,6 +12,7 @@ from itertools import repeat
 from lib.model.drop import DropPath
 from einops import rearrange, repeat
 from lib.graph.pingpong_coco_bi import AdjMatrixGraph as Graph
+from lib.model.retention import RetentionBlock
 
 
 def get_temporal_mask(max_len, window_size):
@@ -24,6 +25,19 @@ def get_temporal_mask(max_len, window_size):
     for i in range(0, max_len, window_size):
         matrix[i:i + window_size, i:i + window_size] = 1
     return matrix
+
+
+def get_temporal_mask_causal(max_len, chunk_size=9):
+    assert max_len % chunk_size == 0, "the length of sequence can not divided by chunk size"
+    # Initialize the matrix with zeros
+    # matrix = np.ones((max_len, max_len))
+    # down_tri_matrix = np.tri(matrix)
+    down_tri_matrix = np.tri(max_len, max_len, k=0, dtype=int)
+
+    # Set the diagonal blocks to 1
+    for i in range(0, max_len, chunk_size):
+        down_tri_matrix[i:i + chunk_size, i:i + chunk_size] = 1
+    return down_tri_matrix
 
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
@@ -105,7 +119,8 @@ class MLP(nn.Module):
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., st_mode='vanilla',
                  isSpatialGraph=False, hop=1, isSpatialAttentionMoE=False, MoE_type="hop1234",
-                 isTemporalAttentionMoE=True, temporal_MoE_type=[9, 27, 81, 243]):
+                 isTemporalAttentionMoE=False, temporal_MoE_type=[27, 81, 243], isTemporalCausal=False, maxlen=243,
+                 isTemporalRetention=True):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -174,13 +189,25 @@ class Attention(nn.Module):
 
         if isTemporalAttentionMoE:
             self.temporal_num_experts = len(temporal_MoE_type)
-            temporal_matrixs = [torch.from_numpy(get_temporal_mask(243, window)) for window in temporal_MoE_type]
+            temporal_matrixs = [torch.from_numpy(get_temporal_mask(maxlen, window)) for window in temporal_MoE_type]
             temporal_attention_masks = [torch.where(matrix == 0, torch.tensor(-100000), torch.tensor(0.0)) for matrix in
                                         temporal_matrixs]
             temporal_attention_masks = torch.stack(temporal_attention_masks, dim=0)
             self.register_buffer('temporal_attention_masks', temporal_attention_masks)
             self.temporal_expert_linear = nn.Linear(dim, self.temporal_num_experts)
             self.temporal_expert_softmax = nn.Softmax(dim=-1)
+        if isTemporalCausal:
+            temporal_matrix_causal = torch.from_numpy(get_temporal_mask_causal(maxlen))
+            temporal_attention_mask = torch.where(temporal_matrix_causal == 0, torch.tensor(-100000), torch.tensor(0.0))
+            self.register_buffer('temporal_attention_mask', temporal_attention_mask)
+
+        if isTemporalRetention:
+            self.temporal_retention = RetentionBlock(dim=dim, num_heads=num_heads,
+                                                     gamma_divider=8, mlp_ratio=2,
+                                                     drop=0., drop_path=0., norm_layer=nn.LayerNorm,
+                                                     joint_related=True, trainable=False,
+                                                     chunk_size=243, seq_len=243, dataset='h36m',
+                                                     num_joints=17)
 
     def forward(self, x, seqlen=1):
         B, N, C = x.shape
@@ -226,6 +253,14 @@ class Attention(nn.Module):
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
             q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
             x = self.forward_temporal_moe(x, q, k, v, seqlen=seqlen)
+        elif self.mode == 'temporal_causal':
+            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+            x = self.forward_temporal_casual(q, k, v, seqlen=seqlen)
+        elif self.mode == "temporal_retention":
+            x = rearrange(x, "(b f) n c -> (b n) f c", f=seqlen)
+            x = self.temporal_retention(x)
+            x = rearrange(x, "(b n) f c -> (b f) n c", n=N)
         else:
             raise NotImplementedError(self.mode)
         x = self.proj(x)
@@ -329,6 +364,20 @@ class Attention(nn.Module):
         x = torch.sum(torch.mul(expert_outs, expert_weights), dim=0)
         return x
 
+    def forward_temporal_casual(self, q, k, v, seqlen=8):
+        B, _, N, C = q.shape
+        qt = q.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
+        kt = k.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
+        vt = v.reshape(-1, seqlen, self.num_heads, N, C).permute(0, 2, 3, 1, 4)  # (B, H, N, T, C)
+        attn = (qt @ kt.transpose(-2, -1)) * self.scale
+        attn = attn + self.temporal_attention_mask
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = attn @ vt  # (B, H, N, T, C)
+        x = x.permute(0, 3, 2, 1, 4).reshape(B, N, C * self.num_heads)
+        return x
+
     def count_attn(self, attn):
         attn = attn.detach().cpu().numpy()
         attn = attn.mean(axis=1)
@@ -346,7 +395,8 @@ class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., mlp_out_ratio=1., qkv_bias=True, qk_scale=None, drop=0.,
                  attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, st_mode='stage_st', att_fuse=False):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, st_mode='stage_st', att_fuse=False,
+                 maxlen=243):
         super().__init__()
         # assert 'stage' in st_mode
         self.st_mode = st_mode
@@ -354,10 +404,10 @@ class Block(nn.Module):
         self.norm1_t = norm_layer(dim)
         self.attn_s = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
-            st_mode="spatial")
+            st_mode="spatial", maxlen=maxlen)
         self.attn_t = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
-            st_mode="temporal_moe")
+            st_mode="temporal_retention", maxlen=maxlen)
 
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -420,21 +470,15 @@ class DSTformer(nn.Module):
             Block(
                 dim=dim_feat, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
-                st_mode="stage_st")
+                st_mode="stage_st", maxlen=maxlen)
             for i in range(depth)])
         self.blocks_ts = nn.ModuleList([
             Block(
                 dim=dim_feat, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
-                st_mode="stage_ts")
+                st_mode="stage_ts", maxlen=maxlen)
             for i in range(depth)])
         self.norm = norm_layer(dim_feat)
-
-        # self.head = nn.Linear(dim_rep, dim_out) if dim_out > 0 else nn.Identity()
-        self.temp_embed = nn.Parameter(torch.zeros(1, maxlen, 1, dim_feat))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_joints, dim_feat))
-        trunc_normal_(self.temp_embed, std=.02)
-        trunc_normal_(self.pos_embed, std=.02)
         self.apply(self._init_weights)
         self.att_fuse = att_fuse
         if self.att_fuse:
@@ -495,7 +539,6 @@ class Unified_Binocular(nn.Module):
                  encoder_left_right_fuse=False, multi_task_head=False, shared_interpreter=False):
         super().__init__()
         self.num_keypoints = num_joints
-
         self.joints_embed = nn.Linear(dim_in, dim_feat)
 
         self.temp_embed = nn.Parameter(torch.zeros(1, maxlen, 1, dim_feat))

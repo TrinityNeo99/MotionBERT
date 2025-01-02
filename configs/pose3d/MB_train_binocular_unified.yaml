@@ -8,12 +8,12 @@ model_saved_name: null
 # Traning 
 epochs: 120
 checkpoint_frequency: 60
-batch_size: 4
+batch_size: 6
 dropout: 0.0
 learning_rate: 0.0002 #org 0.0002
 weight_decay: 0.01
 lr_decay: 0.99 # org 0.99
-tasks: ["binocular_left"]
+tasks: ["binocular_left"] # monocular
 train_mix: False # check this for binocular with monocular
 test_task: binocular_left
 mo_bi_ratio: 1
@@ -31,8 +31,8 @@ backbone: Unified_Binocular
 use_decoder: False
 decoder_dim_feat: 128
 encoder_left_right_fuse: False
-multi_task_head: False # check this for decoder usage
-shared_interpreter: True # note the tasks
+multi_task_head: True # check this for decoder usage
+shared_interpreter: False # note the tasks
 
 # Data
 data_root: "../dataset/binocular_data/sports/binocular_f243s81"
@@ -72,5 +72,5 @@ mask_T_ratio: 0.
 noise: False
 
 # Training
-device_ids: [0,1]
+device_ids: [5]
 #device_ids: [2,3,4,5]

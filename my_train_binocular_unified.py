@@ -596,7 +596,7 @@ def train_with_config(args, opts):
         dummy_input = torch.randn(1, 243, 34, 3)  # B, F, J, C
         flops = FlopCountAnalysis(model_backbone, (dummy_input, "binocular_spatial"))
     else:
-        dummy_input = torch.randn(1, 243, 17, 3)  # B, F, J, C
+        dummy_input = torch.randn(1, args.maxlen, 17, 3)  # B, F, J, C
         flops = FlopCountAnalysis(model_backbone, dummy_input)
     print(f"Total FLOPs: {flops.total() / 1e9:.2f} GFLOPs")  # 转换为百万级
     wandb.log({"FLOPs (G)": round(flops.total() / 1e9, 2)})
@@ -708,6 +708,8 @@ def train_with_config(args, opts):
             elif args.train_mix and "monocular" in args.tasks:
                 train_epoch_mix_single_dataset_per_batch(args, model_pos, train_loader_3d_h36m, train_loader_3d, losses,
                                                          optimizer, has_3d=True, has_gt=True)
+            else:
+                raise Exception("No Such Training Implementation!")
             elapsed = (time() - start_time) / 60
 
             if args.no_eval:
