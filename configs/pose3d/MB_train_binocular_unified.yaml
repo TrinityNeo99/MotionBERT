@@ -72,5 +72,5 @@ mask_T_ratio: 0.
 noise: False
 
 # Training
-device_ids: [5]
+device_ids: [4]
 #device_ids: [2,3,4,5]
