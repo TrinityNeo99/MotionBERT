@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from lib.model.drop import DropPath
 
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -27,7 +28,7 @@ class Mlp(nn.Module):
 
 def fixed_pos_embedding(x):
     seq_len, dim = x.shape
-    inv_freq = 1.0 / (10000**(torch.arange(0, dim) / dim))
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, dim) / dim))
     sinusoid_inp = (torch.einsum("i, j -> i j", torch.arange(0, seq_len, dtype=torch.float), inv_freq).to(x))
     return torch.sin(sinusoid_inp), torch.cos(sinusoid_inp)
 
@@ -86,7 +87,7 @@ class XPOS(nn.Module):
         length = x.shape[1]
         min_pos = - (length + offset) // 2
         max_pos = length + offset + min_pos
-        scale = self.scale**torch.arange(min_pos, max_pos, 1).to(self.scale).div(self.scale_base)[:, None]
+        scale = self.scale ** torch.arange(min_pos, max_pos, 1).to(self.scale).div(self.scale_base)[:, None]
         sin, cos = fixed_pos_embedding(scale)
 
         if scale.shape[0] > length:
@@ -201,15 +202,16 @@ class SimpleRetention(nn.Module):
 
         V = x_i @ self.W_V
 
-        r_i = (K.transpose(-1, -2) @ (V * self.D_chunkwise[-1].view(1, chunk_size, 1).to(x_i.device))) + (self.gamma ** chunk_size) * r_i_1
+        r_i = (K.transpose(-1, -2) @ (V * self.D_chunkwise[-1].view(1, chunk_size, 1).to(x_i.device))) + (
+                    self.gamma ** chunk_size) * r_i_1
 
         inner_chunk = ((Q @ K.transpose(-1, -2)) * self.D_chunkwise.unsqueeze(0).to(x_i.device)) @ V
 
-        #e[i,j] = gamma ** (i+1)
+        # e[i,j] = gamma ** (i+1)
         e = torch.zeros(batch, chunk_size, 1).to(x_i.device)
 
         for _i in range(chunk_size):
-            e[:, _i, :] = self.gamma**(_i + 1)
+            e[:, _i, :] = self.gamma ** (_i + 1)
 
         cross_chunk = (Q @ r_i_1) * e
 
@@ -218,7 +220,8 @@ class SimpleRetention(nn.Module):
 
 class JointRetention(nn.Module):
 
-    def __init__(self, hidden_size, gamma, seq_len, chunk_size, head_size=None, double_v_dim=False, trainable=False, num_joints=17):
+    def __init__(self, hidden_size, gamma, seq_len, chunk_size, head_size=None, double_v_dim=False, trainable=False,
+                 num_joints=17):
         """
         Simple retention mechanism based on the paper
         "Retentive Network: A Successor to Transformer for Large Language Models"[https://arxiv.org/pdf/2307.08621.pdf]
@@ -243,7 +246,7 @@ class JointRetention(nn.Module):
         self.xpos = XPOS(head_size)
         self.D_parallel = self._get_D(parallel=True)
         self.D_chunkwise = self._get_D(parallel=False)
-    
+
     def _get_D(self, parallel=False):
         if parallel:
             D = torch.zeros(self.num_joints, self.seq_len, self.seq_len)
@@ -273,7 +276,7 @@ class JointRetention(nn.Module):
 
         V = X @ self.W_V
         ret = (Q @ K.permute(0, 2, 1)).view(-1, self.num_joints, sequence_length, sequence_length)
-        
+
         ret = ret * self.D_parallel.unsqueeze(0).to(X.device)
         ret = ret.view(-1, sequence_length, sequence_length)
 
@@ -320,13 +323,17 @@ class JointRetention(nn.Module):
 
         V = x_i @ self.W_V
 
-        r_i = torch.pow(self.gamma, chunk_size).unsqueeze(-1).unsqueeze(-1) * r_i_1.view(-1, self.num_joints, self.head_size, self.head_size)
-        VD = V.view(-1, self.num_joints, *V.shape[1:]) * self.D_chunkwise[:, -1].view(1, self.num_joints, chunk_size, 1).to(x_i.device)
+        r_i = torch.pow(self.gamma, chunk_size).unsqueeze(-1).unsqueeze(-1) * r_i_1.view(-1, self.num_joints,
+                                                                                         self.head_size, self.head_size)
+        VD = V.view(-1, self.num_joints, *V.shape[1:]) * self.D_chunkwise[:, -1].view(1, self.num_joints, chunk_size,
+                                                                                      1).to(x_i.device)
         VD = VD.view(-1, *VD.shape[2:])
         r_i = (K.transpose(-1, -2) @ VD) + r_i.view(-1, *r_i.shape[2:])
 
-        inner_chunk = ((Q @ K.transpose(-1, -2)).view(-1, self.num_joints, chunk_size, chunk_size) * self.D_chunkwise.unsqueeze(0).to(x_i.device)).view(-1, chunk_size, chunk_size) @ V
-        
+        inner_chunk = ((Q @ K.transpose(-1, -2)).view(-1, self.num_joints, chunk_size,
+                                                      chunk_size) * self.D_chunkwise.unsqueeze(0).to(x_i.device)).view(
+            -1, chunk_size, chunk_size) @ V
+
         e = torch.pow(self.gamma.unsqueeze(-1), torch.arange(1, chunk_size + 1).unsqueeze(0).to(x_i.device))
         cross_chunk = Q @ r_i_1
         cross_chunk = cross_chunk.view(-1, self.num_joints, *cross_chunk.shape[1:]) * e.unsqueeze(-1)
@@ -337,7 +344,8 @@ class JointRetention(nn.Module):
 
 class MultiScaleRetention(nn.Module):
 
-    def __init__(self, hidden_size, heads, seq_len, chunk_size, gamma_divider=8, double_v_dim=False, joint_related=False, trainable=False, dataset='h36m', num_joints=17):
+    def __init__(self, hidden_size, heads, seq_len, chunk_size, gamma_divider=8, double_v_dim=False,
+                 joint_related=False, trainable=False, dataset='h36m', num_joints=17):
         """
         Multi-scale retention mechanism based on the paper
         "Retentive Network: A Successor to Transformer for Large Language Models"[https://arxiv.org/pdf/2307.08621.pdf]
@@ -360,23 +368,29 @@ class MultiScaleRetention(nn.Module):
                 joints_dividers = [1.5, 1.5, 2, 1, 0.5, 2, 1, 0.5, 2, 1, 0.5, 2, 1, 0.5, 2, 2, 1.5]
             elif dataset == 'mpii3d':
                 joints_dividers = [0.5, 1, 2, 2, 1, 0.5, 0.5, 1, 2, 2, 1, 0.5, 1.5, 1.5]
-            
+            elif dataset == 'coco':
+                joints_dividers = [2, 2, 2, 2, 2, 2, 2, 0.5, 0.5, 0.5, 0.5, 4, 4, 1, 1, 1, 1]
+            else:
+                raise Exception('Unknown dataset: {}'.format(dataset))
+
             self.gamma = torch.zeros(heads, len(joints_dividers))
             for i, jd in enumerate(joints_dividers):
-                self.gamma[:, i] = 1 - torch.exp(torch.linspace(math.log(1 / (jd * gamma_divider)), math.log(1 / (jd * gamma_divider * 16)), heads))
+                self.gamma[:, i] = 1 - torch.exp(
+                    torch.linspace(math.log(1 / (jd * gamma_divider)), math.log(1 / (jd * gamma_divider * 16)), heads))
             self.gamma = self.gamma.detach().cpu().tolist()
         else:
-            self.gamma = (1 - torch.exp(torch.linspace(math.log(1 / gamma_divider), math.log(1 / (gamma_divider * 16)), heads))).detach().cpu().tolist()
+            self.gamma = (1 - torch.exp(torch.linspace(math.log(1 / gamma_divider), math.log(1 / (gamma_divider * 16)),
+                                                       heads))).detach().cpu().tolist()
 
         self.swish = lambda x: x * torch.sigmoid(x)
         self.W_G = nn.Parameter(torch.randn(hidden_size, self.v_dim) / hidden_size)
         self.W_O = nn.Parameter(torch.randn(self.v_dim, hidden_size) / hidden_size)
         self.group_norm = nn.GroupNorm(heads, self.v_dim)
-        
+
         if joint_related:
             self.retentions = nn.ModuleList([
                 JointRetention(self.hidden_size, gamma, seq_len, chunk_size, self.head_size,
-                                double_v_dim, trainable, num_joints) for gamma in self.gamma
+                               double_v_dim, trainable, num_joints) for gamma in self.gamma
             ])
         else:
             self.retentions = nn.ModuleList([
@@ -412,7 +426,8 @@ class MultiScaleRetention(nn.Module):
         batch_size = x_n.shape[0]
 
         for i in range(self.heads):
-            s_n_input = torch.zeros(batch_size, self.head_size, self.head_size).to(x_n.device) if s_n_1s is None else s_n_1s[i]
+            s_n_input = torch.zeros(batch_size, self.head_size, self.head_size).to(x_n.device) if s_n_1s is None else \
+            s_n_1s[i]
             y, s_n = self.retentions[i].forward_recurrent(x_n, s_n_input, n)
             Y.append(y)
             s_ns.append(s_n.detach())
@@ -434,7 +449,8 @@ class MultiScaleRetention(nn.Module):
         batch_size = x_i.shape[0]
 
         for j in range(self.heads):
-            r_i_input = torch.zeros(batch_size, self.head_size, self.head_size).to(x_i.device) if r_i_1s is None else r_i_1s[j]
+            r_i_input = torch.zeros(batch_size, self.head_size, self.head_size).to(x_i.device) if r_i_1s is None else \
+            r_i_1s[j]
             y, r_i = self.retentions[j].forward_chunkwise(x_i, r_i_input, i)
             Y.append(y)
             r_is.append(r_i.detach())
@@ -447,11 +463,14 @@ class MultiScaleRetention(nn.Module):
 
 
 class RetentionBlockUncausal(nn.Module):
-    def __init__(self, dim, num_heads, gamma_divider=8, mlp_ratio=4., drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, 
-                 joint_related=False, trainable=False, chunk_size=None, seq_len=None, dataset='h36m', num_joints=17) -> None:
+    def __init__(self, dim, num_heads, gamma_divider=8, mlp_ratio=4., drop=0., drop_path=0., act_layer=nn.GELU,
+                 norm_layer=nn.LayerNorm,
+                 joint_related=False, trainable=False, chunk_size=None, seq_len=None, dataset='h36m',
+                 num_joints=17) -> None:
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = MultiScaleRetention(dim, num_heads, seq_len, chunk_size, gamma_divider, joint_related=joint_related, trainable=trainable, dataset=dataset, num_joints=num_joints)
+        self.attn = MultiScaleRetention(dim, num_heads, seq_len, chunk_size, gamma_divider, joint_related=joint_related,
+                                        trainable=trainable, dataset=dataset, num_joints=num_joints)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -470,7 +489,7 @@ class RetentionBlockUncausal(nn.Module):
             if f < self.chunk_size:
                 pad_len = self.chunk_size - f
                 x_norm_1 = F.pad(x_norm_1, (0, 0, 0, pad_len))
-            
+
             o_n, s_n = self.attn.forward_chunkwise(x_norm_1, s_n, n)
             # x = x + self.drop_path(o_n[:, :f, :])
             # x = x + self.drop_path(self.mlp(self.norm2(x)))

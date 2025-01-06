@@ -338,7 +338,11 @@ class MultiScaleRetention(nn.Module):
                 joints_dividers = [1.5, 1.5, 2, 1, 0.5, 2, 1, 0.5, 2, 1, 0.5, 2, 1, 0.5, 2, 2, 1.5]
             elif dataset == 'mpii3d':
                 joints_dividers = [0.5, 1, 2, 2, 1, 0.5, 0.5, 1, 2, 2, 1, 0.5, 1.5, 1.5]
-            
+            elif dataset == 'coco':
+                joints_dividers = [2, 2, 2, 2, 2, 2, 2, 0.5, 0.5, 0.5, 0.5, 4, 4, 1, 1, 1, 1]
+            else:
+                raise Exception('Unknown dataset: {}'.format(dataset))
+
             self.gamma = torch.zeros(heads, len(joints_dividers))
             for i, jd in enumerate(joints_dividers):
                 self.gamma[:, i] = 1 - torch.exp(torch.linspace(math.log(1 / (jd * gamma_divider)), math.log(1 / (jd * gamma_divider * 16)), heads))

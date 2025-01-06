@@ -214,7 +214,7 @@ class Attention(nn.Module):
                                                                       gamma_divider=8, mlp_ratio=2,
                                                                       drop=0., drop_path=0., norm_layer=nn.LayerNorm,
                                                                       joint_related=True, trainable=False,
-                                                                      chunk_size=243, seq_len=243, dataset='h36m',
+                                                                      chunk_size=243, seq_len=243, dataset='coco',
                                                                       num_joints=17)
 
     def forward(self, x, seqlen=1):
