@@ -419,7 +419,7 @@ class Block(nn.Module):
             st_mode="spatial", maxlen=maxlen)
         self.attn_t = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
-            st_mode="temporal_retention_uncausal", maxlen=maxlen)
+            st_mode="temporal", maxlen=maxlen)
 
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -471,7 +471,7 @@ class DSTformer(nn.Module):
                  depth=5, num_heads=8, mlp_ratio=4,
                  num_joints=17, maxlen=243,
                  qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
-                 norm_layer=nn.LayerNorm, att_fuse=True):
+                 norm_layer=nn.LayerNorm, att_fuse=True, single_st=True):
         super().__init__()
         self.dim_out = dim_out
         self.dim_feat = dim_feat
@@ -498,6 +498,7 @@ class DSTformer(nn.Module):
             for i in range(depth):
                 self.ts_attn[i].weight.data.fill_(0)
                 self.ts_attn[i].bias.data.fill_(0.5)
+        self.single_st = single_st
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -519,18 +520,23 @@ class DSTformer(nn.Module):
         B, F, J, C = x.shape
         alphas = []
         x = x.reshape(-1, J, C)
-        for idx, (blk_st, blk_ts) in enumerate(zip(self.blocks_st, self.blocks_ts)):
-            x_st = blk_st(x, F)
-            x_ts = blk_ts(x, F)
-            if self.att_fuse:
-                att = self.ts_attn[idx]
-                alpha = torch.cat([x_st, x_ts], dim=-1)
-                BF, J = alpha.shape[:2]
-                alpha = att(alpha)
-                alpha = alpha.softmax(dim=-1)
-                x = x_st * alpha[:, :, 0:1] + x_ts * alpha[:, :, 1:2]
-            else:
-                x = (x_st + x_ts) * 0.5
+        if not self.single_st:
+            for idx, (blk_st, blk_ts) in enumerate(zip(self.blocks_st, self.blocks_ts)):
+                x_st = blk_st(x, F)
+                x_ts = blk_ts(x, F)
+                if self.att_fuse:
+                    att = self.ts_attn[idx]
+                    alpha = torch.cat([x_st, x_ts], dim=-1)
+                    BF, J = alpha.shape[:2]
+                    alpha = att(alpha)
+                    alpha = alpha.softmax(dim=-1)
+                    x = x_st * alpha[:, :, 0:1] + x_ts * alpha[:, :, 1:2]
+                else:
+                    x = (x_st + x_ts) * 0.5
+        else:
+            for idx, blk_st in enumerate(self.blocks_st):
+                x = blk_st(x, F)
+
         x = self.norm(x)
         if return_rep:
             return x
