@@ -291,7 +291,7 @@ class DSTformer_temporal(nn.Module):
                  depth=5, num_heads=8, mlp_ratio=4,
                  num_joints=17, maxlen=243,
                  qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
-                 norm_layer=nn.LayerNorm, att_fuse=True):
+                 norm_layer=nn.LayerNorm, att_fuse=True, single_st=True): # single_st should be false for original dual structure
         super().__init__()
         self.dim_out = dim_out
         self.dim_feat = dim_feat
@@ -330,6 +330,7 @@ class DSTformer_temporal(nn.Module):
             for i in range(depth):
                 self.ts_attn[i].weight.data.fill_(0)
                 self.ts_attn[i].bias.data.fill_(0.5)
+        self.single_st = single_st
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -358,18 +359,22 @@ class DSTformer_temporal(nn.Module):
         x = x.reshape(BF, J, C)
         x = self.pos_drop(x)
         alphas = []
-        for idx, (blk_st, blk_ts) in enumerate(zip(self.blocks_st, self.blocks_ts)):
-            x_st = blk_st(x, F)
-            x_ts = blk_ts(x, F)
-            if self.att_fuse:
-                att = self.ts_attn[idx]
-                alpha = torch.cat([x_st, x_ts], dim=-1)
-                BF, J = alpha.shape[:2]
-                alpha = att(alpha)
-                alpha = alpha.softmax(dim=-1)
-                x = x_st * alpha[:, :, 0:1] + x_ts * alpha[:, :, 1:2]
-            else:
-                x = (x_st + x_ts) * 0.5
+        if not self.single_st:
+            for idx, (blk_st, blk_ts) in enumerate(zip(self.blocks_st, self.blocks_ts)):
+                x_st = blk_st(x, F)
+                x_ts = blk_ts(x, F)
+                if self.att_fuse:
+                    att = self.ts_attn[idx]
+                    alpha = torch.cat([x_st, x_ts], dim=-1)
+                    BF, J = alpha.shape[:2]
+                    alpha = att(alpha)
+                    alpha = alpha.softmax(dim=-1)
+                    x = x_st * alpha[:, :, 0:1] + x_ts * alpha[:, :, 1:2]
+                else:
+                    x = (x_st + x_ts) * 0.5
+        else:
+            for idx, blk_st in enumerate(self.blocks_st):
+                x = blk_st(x, F)
         x = self.norm(x)
         x = x.reshape(B, F, J, -1)
         x = self.pre_logits(x)  # [B, F, J, dim_feat]

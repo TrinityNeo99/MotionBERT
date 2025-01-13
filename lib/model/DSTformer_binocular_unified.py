@@ -120,8 +120,8 @@ class MLP(nn.Module):
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., st_mode='vanilla',
                  isSpatialGraph=False, hop=1, isSpatialAttentionMoE=False, MoE_type="hop1234",
-                 isTemporalAttentionMoE=False, temporal_MoE_type=[27, 81, 243], isTemporalCausal=False, maxlen=243,
-                 isTemporalRetention=False, isTemporalRetentionUncausal=True):
+                 isTemporalAttentionMoE=True, temporal_MoE_type=[27, 81, 243], isTemporalCausal=False, maxlen=243,
+                 isTemporalRetention=False, isTemporalRetentionUncausal=False):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
