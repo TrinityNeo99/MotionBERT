@@ -120,8 +120,8 @@ class MLP(nn.Module):
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., st_mode='vanilla',
                  isSpatialGraph=False, hop=1, isSpatialAttentionMoE=False, MoE_type="hop1234",
-                 isTemporalAttentionMoE=True, temporal_MoE_type=[27, 81, 243], isTemporalCausal=False, maxlen=243,
-                 isTemporalRetention=False, isTemporalRetentionUncausal=False):
+                 isTemporalAttentionMoE=False, temporal_MoE_type=[27, 81, 243], isTemporalCausal=False, maxlen=243,
+                 isTemporalRetention=False, isTemporalRetentionUncausal=False, isTemporalRetentionUncausalMoE=True, temporal_retention_MoE_type=[243]):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -216,6 +216,17 @@ class Attention(nn.Module):
                                                                       joint_related=True, trainable=False,
                                                                       chunk_size=243, seq_len=243, dataset='coco',
                                                                       num_joints=17)
+        if isTemporalRetentionUncausalMoE:
+            self.temporal_num_experts = len(temporal_retention_MoE_type)
+            self.temporal_expert_linear = nn.Linear(dim, self.temporal_num_experts)
+            self.temporal_expert_softmax = nn.Softmax(dim=-1)
+            self.temporal_retention_uncausal_moe = nn.ModuleList([RetentionBlockUncausal(dim=dim, num_heads=num_heads,
+                                                                      gamma_divider=8, mlp_ratio=2,
+                                                                      drop=0., drop_path=0., norm_layer=nn.LayerNorm,
+                                                                      joint_related=True, trainable=False,
+                                                                      chunk_size=expert_chunk_size, seq_len=243, dataset='coco',
+                                                                      num_joints=17) for expert_chunk_size in temporal_retention_MoE_type])
+
 
     def forward(self, x, seqlen=1):
         B, N, C = x.shape
@@ -273,6 +284,11 @@ class Attention(nn.Module):
             x = rearrange(x, "(b f) n c -> (b n) f c", f=seqlen)
             x = self.temporal_retention_uncausal(x)
             x = rearrange(x, "(b n) f c -> (b f) n c", n=N)
+        elif self.mode == 'temporal_retention_uncausal_moe':
+            x = rearrange(x, "(b f) n c -> (b n) f c", f=seqlen)
+            x = self.forward_temporal_retention_uncausal_moe(x)
+            x = rearrange(x, "(b n) f c -> (b f) n c", n=N)
+
         else:
             raise NotImplementedError(self.mode)
         x = self.proj(x)
@@ -390,6 +406,15 @@ class Attention(nn.Module):
         x = x.permute(0, 3, 2, 1, 4).reshape(B, N, C * self.num_heads)
         return x
 
+    def forward_temporal_retention_uncausal_moe(self, x):
+        expert_outs = [self.temporal_retention_uncausal_moe[i](x) for i in range(len(self.temporal_retention_uncausal_moe))]
+        expert_outs = torch.stack(expert_outs, dim=0) # E B F C
+        logit = self.temporal_expert_linear(x) # B F E
+        expert_weights = self.temporal_expert_softmax(logit) # B F E
+        expert_weights = expert_weights.permute(2, 0, 1).unsqueeze(-1) # E B F 1
+        x = torch.sum(torch.mul(expert_outs, expert_weights), dim=0) # (E B F 1) * (E B F C)
+        return x
+
     def count_attn(self, attn):
         attn = attn.detach().cpu().numpy()
         attn = attn.mean(axis=1)
@@ -419,7 +444,7 @@ class Block(nn.Module):
             st_mode="spatial", maxlen=maxlen)
         self.attn_t = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
-            st_mode="temporal", maxlen=maxlen)
+            st_mode="temporal_retention_uncausal_moe", maxlen=maxlen)
 
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
